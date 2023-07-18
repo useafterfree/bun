@@ -1,5 +1,5 @@
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -22,6 +22,7 @@ const allocators = @import("./allocators.zig");
 
 pub const MAX_PATH_BYTES = bun.MAX_PATH_BYTES;
 pub const PathBuffer = [bun.MAX_PATH_BYTES]u8;
+pub const debug = Output.scoped(.fs, true);
 
 // pub const FilesystemImplementation = @import("fs_impl.zig");
 
@@ -32,53 +33,7 @@ pub const Preallocate = struct {
     };
 };
 
-pub const BytecodeCacheFetcher = struct {
-    fd: ?StoredFileDescriptorType = null,
-
-    pub const Available = enum {
-        Unknown,
-        Available,
-        NotAvailable,
-
-        pub inline fn determine(fd: ?StoredFileDescriptorType) Available {
-            if (!comptime FeatureFlags.enable_bytecode_caching) return .NotAvailable;
-
-            const _fd = fd orelse return .Unknown;
-            return if (_fd > 0) .Available else return .NotAvailable;
-        }
-    };
-
-    pub fn fetch(this: *BytecodeCacheFetcher, sourcename: string, fs: *FileSystem.RealFS) ?StoredFileDescriptorType {
-        switch (Available.determine(this.fd)) {
-            .Available => {
-                return this.fd.?;
-            },
-            .NotAvailable => {
-                return null;
-            },
-            .Unknown => {
-                var basename_buf: [512]u8 = undefined;
-                var pathname = Fs.PathName.init(sourcename);
-                std.mem.copy(u8, &basename_buf, pathname.base);
-                std.mem.copy(u8, basename_buf[pathname.base.len..], ".bytecode");
-                const basename = basename_buf[0 .. pathname.base.len + ".bytecode".len];
-
-                if (fs.fetchCacheFile(basename)) |cache_file| {
-                    this.fd = @truncate(StoredFileDescriptorType, cache_file.handle);
-                    return @truncate(StoredFileDescriptorType, cache_file.handle);
-                } else |err| {
-                    Output.prettyWarnln("<r><yellow>Warn<r>: Bytecode caching unavailable due to error: {s}", .{@errorName(err)});
-                    Output.flush();
-                    this.fd = 0;
-                    return null;
-                }
-            },
-        }
-    }
-};
-
 pub const FileSystem = struct {
-    allocator: std.mem.Allocator,
     top_level_dir: string = "/",
 
     // used on subsequent updates
@@ -111,13 +66,13 @@ pub const FileSystem = struct {
 
     pub fn getFdPath(this: *const FileSystem, fd: FileDescriptorType) ![]const u8 {
         var buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-        var dir = try std.os.getFdPath(fd, &buf);
+        var dir = try bun.getFdPath(fd, &buf);
         return try this.dirname_store.append([]u8, dir);
     }
 
     pub fn tmpname(_: *const FileSystem, extname: string, buf: []u8, hash: u64) ![*:0]u8 {
         // PRNG was...not so random
-        const hex_value = @truncate(u64, @intCast(u128, hash) * @intCast(u128, std.time.nanoTimestamp()));
+        const hex_value = @as(u64, @truncate(@as(u128, @intCast(hash)) * @as(u128, @intCast(std.time.nanoTimestamp()))));
 
         return try std.fmt.bufPrintZ(buf, ".{any}{s}", .{ bun.fmt.hexIntLower(hex_value), extname });
     }
@@ -144,25 +99,24 @@ pub const FileSystem = struct {
         ENOTDIR,
     };
 
-    pub fn init1(
-        allocator: std.mem.Allocator,
+    pub fn init(
         top_level_dir: ?string,
     ) !*FileSystem {
-        return init1WithForce(allocator, top_level_dir, false);
+        return initWithForce(top_level_dir, false);
     }
 
-    pub fn init1WithForce(
-        allocator: std.mem.Allocator,
+    pub fn initWithForce(
         top_level_dir: ?string,
         comptime force: bool,
     ) !*FileSystem {
+        const allocator = bun.fs_allocator;
         var _top_level_dir = top_level_dir orelse (if (Environment.isBrowser) "/project/" else try std.process.getCwdAlloc(allocator));
 
         // Ensure there's a trailing separator in the top level directory
         // This makes path resolution more reliable
         if (!std.fs.path.isSep(_top_level_dir[_top_level_dir.len - 1])) {
             const tld = try allocator.alloc(u8, _top_level_dir.len + 1);
-            std.mem.copy(u8, tld, _top_level_dir);
+            bun.copy(u8, tld, _top_level_dir);
             tld[tld.len - 1] = std.fs.path.sep;
             // if (!isBrowser) {
             //     allocator.free(_top_level_dir);
@@ -172,10 +126,8 @@ pub const FileSystem = struct {
 
         if (!instance_loaded or force) {
             instance = FileSystem{
-                .allocator = allocator,
                 .top_level_dir = _top_level_dir,
                 .fs = Implementation.init(
-                    allocator,
                     _top_level_dir,
                 ),
                 // must always use default_allocator since the other allocators may not be threadsafe when an element resizes
@@ -196,43 +148,58 @@ pub const FileSystem = struct {
         pub const EntryStore = allocators.BSSList(Entry, Preallocate.Counts.files);
         dir: string,
         fd: StoredFileDescriptorType = 0,
+        generation: bun.Generation = 0,
         data: EntryMap,
 
         // pub fn removeEntry(dir: *DirEntry, name: string) !void {
         //     // dir.data.remove(name);
         // }
 
-        pub fn addEntry(dir: *DirEntry, entry: std.fs.IterableDir.Entry, allocator: std.mem.Allocator, comptime Iterator: type, iterator: Iterator) !void {
-            var _kind: Entry.Kind = undefined;
-            switch (entry.kind) {
-                .Directory => {
-                    _kind = Entry.Kind.dir;
-                },
-                .SymLink => {
-                    // This might be wrong!
-                    _kind = Entry.Kind.file;
-                },
-                .File => {
-                    _kind = Entry.Kind.file;
-                },
-                else => {
-                    return;
-                },
-            }
-            // entry.name only lives for the duration of the iteration
+        pub fn addEntry(dir: *DirEntry, prev_map: ?*EntryMap, entry: std.fs.IterableDir.Entry, allocator: std.mem.Allocator, comptime Iterator: type, iterator: Iterator) !void {
+            const _kind: Entry.Kind = switch (entry.kind) {
+                .directory => .dir,
+                // This might be wrong!
+                .sym_link => .file,
+                .file => .file,
+                else => return,
+            };
 
-            const name = if (entry.name.len >= strings.StringOrTinyString.Max)
-                strings.StringOrTinyString.init(try FileSystem.FilenameStore.instance.append(@TypeOf(entry.name), entry.name))
-            else
-                strings.StringOrTinyString.init(entry.name);
+            const stored = try brk: {
+                if (prev_map) |map| {
+                    var stack_fallback = std.heap.stackFallback(512, allocator);
+                    const stack = stack_fallback.get();
+                    const prehashed = bun.StringHashMapContext.PrehashedCaseInsensitive.init(stack, entry.name);
+                    defer prehashed.deinit(stack);
+                    if (map.getAdapted(entry.name, prehashed)) |existing| {
+                        existing.mutex.lock();
+                        defer existing.mutex.unlock();
+                        existing.dir = dir.dir;
 
-            const name_lowercased = if (entry.name.len >= strings.StringOrTinyString.Max)
-                strings.StringOrTinyString.init(try FileSystem.FilenameStore.instance.appendLowerCase(@TypeOf(entry.name), entry.name))
-            else
-                strings.StringOrTinyString.initLowerCase(entry.name);
+                        existing.need_stat = existing.need_stat or existing.cache.kind != _kind;
+                        // TODO: is this right?
+                        if (existing.cache.kind != _kind) {
+                            existing.cache.kind = _kind;
 
-            var stored = try EntryStore.instance.append(
-                Entry{
+                            existing.cache.symlink = PathString.empty;
+                        }
+                        break :brk existing;
+                    }
+                }
+
+                // entry.name only lives for the duration of the iteration
+                const name = try strings.StringOrTinyString.initAppendIfNeeded(
+                    entry.name,
+                    *FileSystem.FilenameStore,
+                    &FileSystem.FilenameStore.instance,
+                );
+
+                const name_lowercased = try strings.StringOrTinyString.initLowerCaseAppendIfNeeded(
+                    entry.name,
+                    *FileSystem.FilenameStore,
+                    &FileSystem.FilenameStore.instance,
+                );
+
+                break :brk EntryStore.instance.append(.{
                     .base_ = name,
                     .base_lowercase_ = name_lowercased,
                     .dir = dir.dir,
@@ -240,13 +207,13 @@ pub const FileSystem = struct {
                     // Call "stat" lazily for performance. The "@material-ui/icons" package
                     // contains a directory with over 11,000 entries in it and running "stat"
                     // for each entry was a big performance issue for that package.
-                    .need_stat = entry.kind == .SymLink,
-                    .cache = Entry.Cache{
+                    .need_stat = entry.kind == .sym_link,
+                    .cache = .{
                         .symlink = PathString.empty,
                         .kind = _kind,
                     },
-                },
-            );
+                });
+            };
 
             const stored_name = stored.base();
 
@@ -265,12 +232,16 @@ pub const FileSystem = struct {
             }
         }
 
-        pub fn init(dir: string) DirEntry {
+        pub fn init(dir: string, generation: bun.Generation) DirEntry {
             if (comptime FeatureFlags.verbose_fs) {
                 Output.prettyln("\n  {s}", .{dir});
             }
 
-            return DirEntry{ .dir = dir, .data = EntryMap{} };
+            return .{
+                .dir = dir,
+                .data = .{},
+                .generation = generation,
+            };
         }
 
         pub const Err = struct {
@@ -291,7 +262,7 @@ pub const FileSystem = struct {
             const query = strings.copyLowercaseIfNeeded(_query, &scratch_lookup_buffer);
             const result = entry.data.get(query) orelse return null;
             const basename = result.base();
-            if (!strings.eql(basename, _query)) {
+            if (!strings.eqlLong(basename, _query, true)) {
                 return Entry.Lookup{ .entry = result, .diff_case = Entry.Lookup.DifferentCase{
                     .dir = entry.dir,
                     .query = _query,
@@ -304,7 +275,7 @@ pub const FileSystem = struct {
 
         pub fn getComptimeQuery(entry: *const DirEntry, comptime query_str: anytype) ?Entry.Lookup {
             comptime var query: [query_str.len]u8 = undefined;
-            comptime for (query_str) |c, i| {
+            comptime for (query_str, 0..) |c, i| {
                 query[i] = std.ascii.toLower(c);
             };
 
@@ -341,7 +312,7 @@ pub const FileSystem = struct {
 
         pub fn hasComptimeQuery(entry: *const DirEntry, comptime query_str: anytype) bool {
             comptime var query: [query_str.len]u8 = undefined;
-            comptime for (query_str) |c, i| {
+            comptime for (query_str, 0..) |c, i| {
                 query[i] = std.ascii.toLower(c);
             };
 
@@ -363,7 +334,7 @@ pub const FileSystem = struct {
     };
 
     pub const Entry = struct {
-        cache: Cache = Cache{},
+        cache: Cache = .{},
         dir: string,
 
         base_: strings.StringOrTinyString,
@@ -376,11 +347,11 @@ pub const FileSystem = struct {
 
         abs_path: PathString = PathString.empty,
 
-        pub inline fn base(this: *const Entry) string {
+        pub inline fn base(this: *Entry) string {
             return this.base_.slice();
         }
 
-        pub inline fn base_lowercase(this: *const Entry) string {
+        pub inline fn base_lowercase(this: *Entry) string {
             return this.base_lowercase_.slice();
         }
 
@@ -406,7 +377,7 @@ pub const FileSystem = struct {
         pub const Cache = struct {
             symlink: PathString = PathString.empty,
             fd: StoredFileDescriptorType = 0,
-            kind: Kind = Kind.file,
+            kind: Kind = .file,
         };
 
         pub const Kind = enum {
@@ -414,21 +385,21 @@ pub const FileSystem = struct {
             file,
         };
 
-        pub fn kind(entry: *Entry, fs: *Implementation) Kind {
+        pub fn kind(entry: *Entry, fs: *Implementation, store_fd: bool) Kind {
             if (entry.need_stat) {
                 entry.need_stat = false;
                 // This is technically incorrect, but we are choosing not to handle errors here
-                entry.cache = fs.kind(entry.dir, entry.base(), entry.cache.fd) catch return entry.cache.kind;
+                entry.cache = fs.kind(entry.dir, entry.base(), entry.cache.fd, store_fd) catch return entry.cache.kind;
             }
             return entry.cache.kind;
         }
 
-        pub fn symlink(entry: *Entry, fs: *Implementation) string {
+        pub fn symlink(entry: *Entry, fs: *Implementation, store_fd: bool) string {
             if (entry.need_stat) {
                 entry.need_stat = false;
                 // This is technically incorrect, but we are choosing not to handle errors here
                 // This error can happen if the file was deleted between the time the directory was scanned and the time it was read
-                entry.cache = fs.kind(entry.dir, entry.base(), entry.cache.fd) catch return "";
+                entry.cache = fs.kind(entry.dir, entry.base(), entry.cache.fd, store_fd) catch return "";
             }
             return entry.cache.symlink.slice();
         }
@@ -530,7 +501,7 @@ pub const FileSystem = struct {
         const LIMITS = [_]std.os.rlimit_resource{ std.os.rlimit_resource.STACK, std.os.rlimit_resource.NOFILE };
         Output.print("{{\n", .{});
 
-        inline for (LIMITS) |limit_type, i| {
+        inline for (LIMITS, 0..) |limit_type, i| {
             const limit = std.os.getrlimit(limit_type) catch return;
 
             if (i == 0) {
@@ -547,7 +518,6 @@ pub const FileSystem = struct {
     pub const RealFS = struct {
         entries_mutex: Mutex = Mutex.init(),
         entries: *EntriesOption.Map,
-        allocator: std.mem.Allocator,
         cwd: string,
         parent_fs: *FileSystem = undefined,
         file_limit: usize = 32,
@@ -563,6 +533,15 @@ pub const FileSystem = struct {
 
         pub var tmpdir_path: []const u8 = undefined;
         pub var tmpdir_path_set = false;
+        pub fn tmpdirPath(_: *const @This()) []const u8 {
+            if (!tmpdir_path_set) {
+                tmpdir_path = bun.getenvZ("BUN_TMPDIR") orelse bun.getenvZ("TMPDIR") orelse PLATFORM_TMP_DIR;
+                tmpdir_path_set = true;
+            }
+
+            return tmpdir_path;
+        }
+
         pub fn openTmpDir(_: *const RealFS) !std.fs.Dir {
             if (!tmpdir_path_set) {
                 tmpdir_path = bun.getenvZ("BUN_TMPDIR") orelse bun.getenvZ("TMPDIR") orelse PLATFORM_TMP_DIR;
@@ -572,6 +551,38 @@ pub const FileSystem = struct {
             return (try std.fs.cwd().openIterableDir(tmpdir_path, .{
                 .access_sub_paths = true,
             })).dir;
+        }
+
+        pub fn entriesAt(this: *RealFS, index: allocators.IndexType, generation: bun.Generation) ?*EntriesOption {
+            var existing = this.entries.atIndex(index) orelse return null;
+            if (existing.* == .entries) {
+                if (existing.entries.generation < generation) {
+                    var handle = std.fs.Dir.openIterableDir(std.fs.cwd(), existing.entries.dir, .{}) catch |err| {
+                        existing.entries.data.clearAndFree(bun.fs_allocator);
+
+                        return this.readDirectoryError(existing.entries.dir, err) catch unreachable;
+                    };
+                    defer handle.close();
+
+                    const new_entry = this.readdir(
+                        false,
+                        &existing.entries.data,
+                        existing.entries.dir,
+                        generation,
+                        handle.dir,
+
+                        void,
+                        void{},
+                    ) catch |err| {
+                        existing.entries.data.clearAndFree(bun.fs_allocator);
+                        return this.readDirectoryError(existing.entries.dir, err) catch unreachable;
+                    };
+                    existing.entries.data.clearAndFree(bun.fs_allocator);
+                    existing.entries.* = new_entry;
+                }
+            }
+
+            return existing;
         }
 
         pub fn getDefaultTempDir() string {
@@ -673,7 +684,7 @@ pub const FileSystem = struct {
         // Always try to max out how many files we can keep open
         pub fn adjustUlimit() !usize {
             const LIMITS = [_]std.os.rlimit_resource{ std.os.rlimit_resource.STACK, std.os.rlimit_resource.NOFILE };
-            inline for (LIMITS) |limit_type, i| {
+            inline for (LIMITS, 0..) |limit_type, i| {
                 const limit = try std.os.getrlimit(limit_type);
 
                 if (limit.cur < limit.max) {
@@ -697,19 +708,17 @@ pub const FileSystem = struct {
         var _entries_option_map: *EntriesOption.Map = undefined;
         var _entries_option_map_loaded: bool = false;
         pub fn init(
-            allocator: std.mem.Allocator,
             cwd: string,
         ) RealFS {
             const file_limit = adjustUlimit() catch unreachable;
 
             if (!_entries_option_map_loaded) {
-                _entries_option_map = EntriesOption.Map.init(allocator);
+                _entries_option_map = EntriesOption.Map.init(bun.fs_allocator);
                 _entries_option_map_loaded = true;
             }
 
             return RealFS{
                 .entries = _entries_option_map,
-                .allocator = allocator,
                 .cwd = cwd,
                 .file_limit = file_limit,
                 .file_quota = file_limit,
@@ -758,8 +767,8 @@ pub const FileSystem = struct {
                 std.mem.writeIntNative(@TypeOf(this.mtime), hash_bytes_remain[0..@sizeOf(@TypeOf(this.mtime))], this.mtime);
                 hash_bytes_remain = hash_bytes_remain[@sizeOf(@TypeOf(this.mtime))..];
                 std.debug.assert(hash_bytes_remain.len == 8);
-                hash_bytes_remain[0..8].* = @bitCast([8]u8, @as(u64, 0));
-                return std.hash.Wyhash.hash(0, &hash_bytes);
+                hash_bytes_remain[0..8].* = @as([8]u8, @bitCast(@as(u64, 0)));
+                return bun.hash(&hash_bytes);
             }
 
             pub fn generate(_: *RealFS, _: string, file: std.fs.File) anyerror!ModKey {
@@ -805,7 +814,7 @@ pub const FileSystem = struct {
         }
 
         pub const EntriesOption = union(Tag) {
-            entries: DirEntry,
+            entries: *DirEntry,
             err: DirEntry.Err,
 
             pub const Tag = enum {
@@ -828,24 +837,31 @@ pub const FileSystem = struct {
 
         fn readdir(
             fs: *RealFS,
+            store_fd: bool,
+            prev_map: ?*DirEntry.EntryMap,
             _dir: string,
+            generation: bun.Generation,
             handle: std.fs.Dir,
             comptime Iterator: type,
             iterator: Iterator,
         ) !DirEntry {
+            _ = fs;
+
             var iter = (std.fs.IterableDir{ .dir = handle }).iterate();
-            var dir = DirEntry.init(_dir);
-            const allocator = fs.allocator;
+            var dir = DirEntry.init(_dir, generation);
+            const allocator = bun.fs_allocator;
             errdefer dir.deinit(allocator);
 
-            if (FeatureFlags.store_file_descriptors) {
+            if (store_fd) {
                 FileSystem.setMaxFd(handle.fd);
                 dir.fd = handle.fd;
             }
 
             while (try iter.next()) |_entry| {
-                try dir.addEntry(_entry, allocator, Iterator, iterator);
+                try dir.addEntry(prev_map, _entry, allocator, Iterator, iterator);
             }
+
+            debug("readdir({d}, {s}) = {d}", .{ handle.fd, _dir, dir.data.count() });
 
             return dir;
         }
@@ -868,11 +884,25 @@ pub const FileSystem = struct {
 
         threadlocal var temp_entries_option: EntriesOption = undefined;
 
-        pub fn readDirectory(fs: *RealFS, _dir: string, _handle: ?std.fs.Dir) !*EntriesOption {
-            return readDirectoryWithIterator(fs, _dir, _handle, void, void{});
+        pub fn readDirectory(
+            fs: *RealFS,
+            _dir: string,
+            _handle: ?std.fs.Dir,
+            generation: bun.Generation,
+            store_fd: bool,
+        ) !*EntriesOption {
+            return fs.readDirectoryWithIterator(_dir, _handle, generation, store_fd, void, {});
         }
 
-        pub fn readDirectoryWithIterator(fs: *RealFS, _dir: string, _handle: ?std.fs.Dir, comptime Iterator: type, iterator: Iterator) !*EntriesOption {
+        // One of the learnings here
+        //
+        //   Closing file descriptors yields significant performance benefits on Linux
+        //
+        // It was literally a 300% performance improvement to bundling.
+        // https://twitter.com/jarredsumner/status/1655787337027309568
+        // https://twitter.com/jarredsumner/status/1655714084569120770
+        // https://twitter.com/jarredsumner/status/1655464485245845506
+        pub fn readDirectoryWithIterator(fs: *RealFS, _dir: string, _handle: ?std.fs.Dir, generation: bun.Generation, store_fd: bool, comptime Iterator: type, iterator: Iterator) !*EntriesOption {
             var dir = _dir;
             var cache_result: ?allocators.Result = null;
             if (comptime FeatureFlags.enable_entry_cache) {
@@ -883,13 +913,18 @@ pub const FileSystem = struct {
                     fs.entries_mutex.unlock();
                 }
             }
+            var in_place: ?*DirEntry = null;
 
             if (comptime FeatureFlags.enable_entry_cache) {
                 cache_result = try fs.entries.getOrPut(dir);
 
                 if (cache_result.?.hasCheckedIfExists()) {
                     if (fs.entries.atIndex(cache_result.?.index)) |cached_result| {
-                        return cached_result;
+                        if (cached_result.* != .entries or (cached_result.* == .entries and cached_result.entries.generation >= generation)) {
+                            return cached_result;
+                        }
+
+                        in_place = cached_result.entries;
                     }
                 }
             }
@@ -897,29 +932,46 @@ pub const FileSystem = struct {
             var handle = _handle orelse try fs.openDir(dir);
 
             defer {
-                if (_handle == null and fs.needToCloseFiles()) {
+                if (_handle == null and (!store_fd or fs.needToCloseFiles())) {
                     handle.close();
                 }
             }
 
             // if we get this far, it's a real directory, so we can just store the dir name.
             if (_handle == null) {
-                dir = try DirnameStore.instance.append(string, _dir);
+                dir = try if (in_place) |existing|
+                    existing.dir
+                else
+                    DirnameStore.instance.append(string, _dir);
             }
 
             // Cache miss: read the directory entries
             var entries = fs.readdir(
+                store_fd,
+                if (in_place) |existing| &existing.data else null,
                 dir,
+                generation,
                 handle,
+
                 Iterator,
                 iterator,
             ) catch |err| {
+                if (in_place) |existing| existing.data.clearAndFree(bun.fs_allocator);
+
                 return fs.readDirectoryError(dir, err) catch unreachable;
             };
 
             if (comptime FeatureFlags.enable_entry_cache) {
+                var entries_ptr = in_place orelse bun.fs_allocator.create(DirEntry) catch unreachable;
+                if (in_place) |original| {
+                    original.data.clearAndFree(bun.fs_allocator);
+                }
+                if (store_fd and entries.fd == 0)
+                    entries.fd = handle.fd;
+
+                entries_ptr.* = entries;
                 const result = EntriesOption{
-                    .entries = entries,
+                    .entries = entries_ptr,
                 };
 
                 var out = try fs.entries.put(&cache_result.?, result);
@@ -943,6 +995,28 @@ pub const FileSystem = struct {
             shared_buffer: *MutableString,
             comptime stream: bool,
         ) !File {
+            return readFileWithHandleAndAllocator(
+                fs,
+                bun.fs_allocator,
+                path,
+                _size,
+                file,
+                use_shared_buffer,
+                shared_buffer,
+                stream,
+            );
+        }
+
+        pub fn readFileWithHandleAndAllocator(
+            fs: *RealFS,
+            allocator: std.mem.Allocator,
+            path: string,
+            _size: ?usize,
+            file: std.fs.File,
+            comptime use_shared_buffer: bool,
+            shared_buffer: *MutableString,
+            comptime stream: bool,
+        ) !File {
             FileSystem.setMaxFd(file.handle);
 
             // Skip the extra file.stat() call when possible
@@ -950,6 +1024,7 @@ pub const FileSystem = struct {
                 fs.readFileError(path, err);
                 return err;
             });
+            debug("stat({d}) = {d}", .{ file.handle, size });
 
             // Skip the pread call for empty files
             // Otherwise will get out of bounds errors
@@ -972,7 +1047,7 @@ pub const FileSystem = struct {
             if (use_shared_buffer) {
                 shared_buffer.reset();
                 var offset: u64 = 0;
-                try shared_buffer.growBy(size);
+                try shared_buffer.growBy(size + 1);
                 shared_buffer.list.expandToCapacity();
 
                 // if you press save on a large file we might not read all the
@@ -988,6 +1063,7 @@ pub const FileSystem = struct {
                     };
                     shared_buffer.list.items = shared_buffer.list.items[0 .. read_count + offset];
                     file_contents = shared_buffer.list.items;
+                    debug("pread({d}, {d}) = {d}", .{ file.handle, size, read_count });
 
                     if (comptime stream) {
                         // check again that stat() didn't change the file size
@@ -1011,20 +1087,89 @@ pub const FileSystem = struct {
                     }
                     break;
                 }
+
+                if (shared_buffer.list.capacity > file_contents.len) {
+                    file_contents.ptr[file_contents.len] = 0;
+                }
             } else {
                 // We use pread to ensure if the file handle was open, it doesn't seek from the last position
-                var buf = try fs.allocator.alloc(u8, size);
+                var buf = try allocator.alloc(u8, size + 1);
+
+                // stick a zero at the end
+                buf[size] = 0;
+
                 const read_count = file.preadAll(buf, 0) catch |err| {
                     fs.readFileError(path, err);
                     return err;
                 };
                 file_contents = buf[0..read_count];
+                debug("pread({d}, {d}) = {d}", .{ file.handle, size, read_count });
             }
 
             return File{ .path = Path.init(path), .contents = file_contents };
         }
 
-        pub fn kind(fs: *RealFS, _dir: string, base: string, existing_fd: StoredFileDescriptorType) !Entry.Cache {
+        pub fn kindFromAbsolute(
+            fs: *RealFS,
+            absolute_path: [:0]const u8,
+            existing_fd: StoredFileDescriptorType,
+            store_fd: bool,
+        ) !Entry.Cache {
+            var outpath: [bun.MAX_PATH_BYTES]u8 = undefined;
+
+            var stat = try C.lstat_absolute(absolute_path);
+            const is_symlink = stat.kind == std.fs.File.Kind.SymLink;
+            var _kind = stat.kind;
+            var cache = Entry.Cache{
+                .kind = Entry.Kind.file,
+                .symlink = PathString.empty,
+            };
+            var symlink: []const u8 = "";
+
+            if (is_symlink) {
+                var file = try if (existing_fd != 0)
+                    std.fs.File{ .handle = existing_fd }
+                else if (store_fd)
+                    std.fs.openFileAbsoluteZ(absolute_path, .{ .mode = .read_only })
+                else
+                    bun.openFileForPath(absolute_path);
+                setMaxFd(file.handle);
+
+                defer {
+                    if ((!store_fd or fs.needToCloseFiles()) and existing_fd == 0) {
+                        file.close();
+                    } else if (comptime FeatureFlags.store_file_descriptors) {
+                        cache.fd = file.handle;
+                    }
+                }
+                const _stat = try file.stat();
+
+                symlink = try bun.getFdPath(file.handle, &outpath);
+
+                _kind = _stat.kind;
+            }
+
+            std.debug.assert(_kind != .SymLink);
+
+            if (_kind == .Directory) {
+                cache.kind = .dir;
+            } else {
+                cache.kind = .file;
+            }
+            if (symlink.len > 0) {
+                cache.symlink = PathString.init(try FilenameStore.instance.append([]const u8, symlink));
+            }
+
+            return cache;
+        }
+
+        pub fn kind(
+            fs: *RealFS,
+            _dir: string,
+            base: string,
+            existing_fd: StoredFileDescriptorType,
+            store_fd: bool,
+        ) !Entry.Cache {
             var dir = _dir;
             var combo = [2]string{ dir, base };
             var outpath: [bun.MAX_PATH_BYTES]u8 = undefined;
@@ -1036,7 +1181,7 @@ pub const FileSystem = struct {
             const absolute_path_c: [:0]const u8 = outpath[0..entry_path.len :0];
 
             var stat = try C.lstat_absolute(absolute_path_c);
-            const is_symlink = stat.kind == std.fs.File.Kind.SymLink;
+            const is_symlink = stat.kind == std.fs.File.Kind.sym_link;
             var _kind = stat.kind;
             var cache = Entry.Cache{
                 .kind = Entry.Kind.file,
@@ -1045,11 +1190,16 @@ pub const FileSystem = struct {
             var symlink: []const u8 = "";
 
             if (is_symlink) {
-                var file = if (existing_fd != 0) std.fs.File{ .handle = existing_fd } else try std.fs.openFileAbsoluteZ(absolute_path_c, .{ .mode = .read_only });
+                var file = try if (existing_fd != 0)
+                    std.fs.File{ .handle = existing_fd }
+                else if (store_fd)
+                    std.fs.openFileAbsoluteZ(absolute_path_c, .{ .mode = .read_only })
+                else
+                    bun.openFileForPath(absolute_path_c);
                 setMaxFd(file.handle);
 
                 defer {
-                    if (fs.needToCloseFiles() and existing_fd == 0) {
+                    if ((!store_fd or fs.needToCloseFiles()) and existing_fd == 0) {
                         file.close();
                     } else if (comptime FeatureFlags.store_file_descriptors) {
                         cache.fd = file.handle;
@@ -1057,14 +1207,14 @@ pub const FileSystem = struct {
                 }
                 const _stat = try file.stat();
 
-                symlink = try std.os.getFdPath(file.handle, &outpath);
+                symlink = try bun.getFdPath(file.handle, &outpath);
 
                 _kind = _stat.kind;
             }
 
-            std.debug.assert(_kind != .SymLink);
+            std.debug.assert(_kind != .sym_link);
 
-            if (_kind == .Directory) {
+            if (_kind == .directory) {
                 cache.kind = .dir;
             } else {
                 cache.kind = .file;
@@ -1094,12 +1244,111 @@ pub const FileSystem = struct {
 pub const Directory = struct { path: Path, contents: []string };
 pub const File = struct { path: Path, contents: string };
 
+pub const NodeJSPathName = struct {
+    base: string,
+    dir: string,
+    /// includes the leading .
+    ext: string,
+    filename: string,
+
+    pub fn init(_path: string, sep: u8) NodeJSPathName {
+        var path = _path;
+        var base = path;
+        // ext must be empty if not detected
+        var ext: string = "";
+        var dir = path;
+        var is_absolute = true;
+        var _i = strings.lastIndexOfChar(path, sep);
+        var first = true;
+        while (_i) |i| {
+
+            // Stop if we found a non-trailing slash
+            if (i + 1 != path.len and path.len >= i + 1) {
+                base = path[i + 1 ..];
+                dir = path[0..i];
+                is_absolute = false;
+                break;
+            }
+
+            // If the path starts with a slash and it's the only slash, it's absolute
+            if (i == 0 and first) {
+                base = path[1..];
+                dir = &([_]u8{});
+                break;
+            }
+
+            first = false;
+            // Ignore trailing slashes
+
+            path = path[0..i];
+
+            _i = strings.lastIndexOfChar(path, sep);
+        }
+
+        // clean trailing slashs
+        if (base.len > 1 and base[base.len - 1] == sep) {
+            base = base[0 .. base.len - 1];
+        }
+
+        // filename is base without extension
+        var filename = base;
+
+        // if only one character ext = "" even if filename it's "."
+        if (filename.len > 1) {
+            // Strip off the extension
+            var _dot = strings.lastIndexOfChar(filename, '.');
+            if (_dot) |dot| {
+                ext = filename[dot..];
+                if (dot > 0)
+                    filename = filename[0..dot];
+            }
+        }
+
+        if (is_absolute) {
+            dir = &([_]u8{});
+        }
+
+        return NodeJSPathName{
+            .dir = dir,
+            .base = base,
+            .ext = ext,
+            .filename = filename,
+        };
+    }
+};
+
 pub const PathName = struct {
     base: string,
     dir: string,
     /// includes the leading .
     ext: string,
     filename: string,
+    pub fn nonUniqueNameStringBase(self: *const PathName) string {
+        // /bar/foo/index.js -> foo
+        if (self.dir.len > 0 and strings.eqlComptime(self.base, "index")) {
+            // "/index" -> "index"
+            return Fs.PathName.init(self.dir).base;
+        }
+
+        if (comptime Environment.allow_assert) {
+            std.debug.assert(!strings.includes(self.base, "/"));
+        }
+
+        // /bar/foo.js -> foo
+        return self.base;
+    }
+
+    pub fn dirOrDot(this: *const PathName) string {
+        if (this.dir.len == 0) {
+            return ".";
+        }
+
+        return this.dir;
+    }
+
+    pub fn fmtIdentifier(self: *const PathName) strings.FormatValidIdentifier {
+        return strings.fmtIdentifier(self.nonUniqueNameStringBase());
+    }
 
     // For readability, the names of certain automatically-generated symbols are
     // derived from the file name. For example, instead of the CommonJS wrapper for
@@ -1113,13 +1362,7 @@ pub const PathName = struct {
     // through the renaming logic that all other symbols go through to avoid name
     // collisions.
     pub fn nonUniqueNameString(self: *const PathName, allocator: std.mem.Allocator) !string {
-        if (strings.eqlComptime(self.base, "index")) {
-            if (self.dir.len > 0) {
-                return MutableString.ensureValidIdentifier(PathName.init(self.dir).base, allocator);
-            }
-        }
-
-        return MutableString.ensureValidIdentifier(self.base, allocator);
+        return MutableString.ensureValidIdentifier(self.nonUniqueNameStringBase(), allocator);
     }
 
     pub inline fn dirWithTrailingSlash(this: *const PathName) string {
@@ -1127,11 +1370,11 @@ pub const PathName = struct {
         // so if dir does not have a trailing slash, but is spaced one apart from the basename
         // we can assume there is a trailing slash there
         // so we extend the original slice's length by one
-        return if (this.dir.len == 0) "./" else this.dir.ptr[0 .. this.dir.len + @intCast(
+        return if (this.dir.len == 0) "./" else this.dir.ptr[0 .. this.dir.len + @as(
             usize,
-            @boolToInt(
-                this.dir[this.dir.len - 1] != std.fs.path.sep_posix and (@ptrToInt(this.dir.ptr) + this.dir.len + 1) == @ptrToInt(this.base.ptr),
-            ),
+            @intCast(@intFromBool(
+                this.dir[this.dir.len - 1] != std.fs.path.sep_posix and (@intFromPtr(this.dir.ptr) + this.dir.len + 1) == @intFromPtr(this.base.ptr),
+            )),
         )];
     }
 
@@ -1145,7 +1388,7 @@ pub const PathName = struct {
         var _i = strings.lastIndexOfChar(path, '/');
         while (_i) |i| {
             // Stop if we found a non-trailing slash
-            if (i + 1 != path.len) {
+            if (i + 1 != path.len and path.len > i + 1) {
                 base = path[i + 1 ..];
                 dir = path[0..i];
                 is_absolute = false;
@@ -1169,6 +1412,10 @@ pub const PathName = struct {
             dir = &([_]u8{});
         }
 
+        if (base.len > 1 and base[base.len - 1] == '/') {
+            base = base[0 .. base.len - 1];
+        }
+
         return PathName{
             .dir = dir,
             .base = base,
@@ -1188,6 +1435,49 @@ pub const Path = struct {
     name: PathName,
     is_disabled: bool = false,
     is_symlink: bool = false,
+
+    pub fn isFile(this: *const Path) bool {
+        return this.namespace.len == 0 or strings.eqlComptime(this.namespace, "file");
+    }
+
+    pub fn hashKey(this: *const Path) u64 {
+        if (this.isFile()) {
+            return bun.hash(this.text);
+        }
+
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(this.namespace);
+        hasher.update("::::::::");
+        hasher.update(this.text);
+        return hasher.final();
+    }
+
+    pub fn packageName(this: *const Path) ?string {
+        var name_to_use = this.pretty;
+        if (strings.lastIndexOf(this.text, std.fs.path.sep_str ++ "node_modules" ++ std.fs.path.sep_str)) |node_modules| {
+            name_to_use = this.text[node_modules + 14 ..];
+        }
+
+        const pkgname = bun.options.JSX.Pragma.parsePackageName(name_to_use);
+        if (pkgname.len == 0 or !std.ascii.isAlphanumeric(pkgname[0]))
+            return null;
+
+        return pkgname;
+    }
+
+    pub fn loader(this: *const Path, loaders: *const bun.options.Loader.HashTable) ?bun.options.Loader {
+        if (this.isDataURL()) {
+            return bun.options.Loader.dataurl;
+        }
+
+        const ext = this.name.ext;
+
+        return loaders.get(ext) orelse bun.options.Loader.fromString(ext);
+    }
+
+    pub fn isDataURL(this: *const Path) bool {
+        return strings.eqlComptime(this.namespace, "dataurl");
+    }
 
     pub fn isBun(this: *const Path) bool {
         return strings.eqlComptime(this.namespace, "bun");
@@ -1265,10 +1555,10 @@ pub const Path = struct {
                 return new_path;
             } else {
                 var buf = try allocator.alloc(u8, this.text.len + this.pretty.len + 2);
-                std.mem.copy(u8, buf, this.text);
+                bun.copy(u8, buf, this.text);
                 buf.ptr[this.text.len] = 0;
-                var new_pretty = buf[this.text.len + 1 ..];
-                std.mem.copy(u8, buf[this.text.len + 1 ..], this.pretty);
+                var new_pretty = buf[this.text.len + 1 ..][0..this.pretty.len];
+                bun.copy(u8, buf[this.text.len + 1 ..], this.pretty);
                 var new_path = Fs.Path.init(buf[0..this.text.len]);
                 buf.ptr[buf.len - 1] = 0;
                 new_path.pretty = new_pretty;

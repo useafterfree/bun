@@ -1,7 +1,6 @@
 .DS_Store
 zig-cache
-*.wasm
-
+packages/*/*.wasm
 *.o
 *.a
 profile.json
@@ -14,7 +13,7 @@ dist
 *.log
 *.out.js
 *.out.refresh.js
-/package-lock.json
+**/package-lock.json
 build
 *.wat
 zig-out
@@ -46,6 +45,7 @@ outcss
 txt.js
 .idea
 .vscode/cpp*
+.vscode/clang*
 
 node_modules_*
 *.jsb
@@ -108,3 +108,18 @@ misctools/machbench
 .eslintcache
 
 bun-webkit
+
+src/deps/c-ares/build
+src/bun.js/bindings-obj
+src/bun.js/debug-bindings-obj
+
+failing-tests.txt
+test.txt
+myscript.sh
+
+cold-jsc-start
+cold-jsc-start.d
+
+/test.ts
+
+src/js/out/modules_dev

@@ -1,11 +1,11 @@
-const JSC = @import("bun").JSC;
+const JSC = @import("root").bun.JSC;
 const std = @import("std");
 const Flavor = JSC.Node.Flavor;
 const ArgumentsSlice = JSC.Node.ArgumentsSlice;
 const system = std.os.system;
 const Maybe = JSC.Maybe;
 const Encoding = JSC.Node.Encoding;
-const FeatureFlags = @import("bun").FeatureFlags;
+const FeatureFlags = @import("root").bun.FeatureFlags;
 const Args = JSC.Node.NodeFS.Arguments;
 const d = JSC.d;
 
@@ -38,13 +38,22 @@ fn callSync(comptime FunctionEnum: NodeFSFunctionEnum) NodeFSFunction {
             var exceptionref: JSC.C.JSValueRef = null;
 
             var arguments = callframe.arguments(8);
+
             var slice = ArgumentsSlice.init(globalObject.bunVM(), arguments.ptr[0..arguments.len]);
             defer slice.deinit();
 
             const args = if (comptime Arguments != void)
-                (Arguments.fromJS(globalObject, &slice, &exceptionref) orelse return .zero)
+                (Arguments.fromJS(globalObject, &slice, &exceptionref) orelse {
+                    // we might've already thrown
+                    if (exceptionref != null)
+                        globalObject.throwValue(JSC.JSValue.c(exceptionref));
+                    return .zero;
+                })
             else
                 Arguments{};
+            defer {
+                if (comptime Arguments != void and @hasDecl(Arguments, "deinit")) args.deinit();
+            }
 
             const exception1 = JSC.JSValue.c(exceptionref);
 
@@ -220,6 +229,10 @@ pub const NodeJSFS = struct {
     pub const lutimesSync = callSync(.lutimes);
     pub const rmSync = callSync(.rm);
     pub const rmdirSync = callSync(.rmdir);
+    pub const writev = call(.writev);
+    pub const writevSync = callSync(.writev);
+    pub const readv = call(.readv);
+    pub const readvSync = callSync(.readv);
 
     pub const fdatasyncSync = callSync(.fdatasync);
     pub const fdatasync = call(.fdatasync);
@@ -228,12 +241,14 @@ pub const NodeJSFS = struct {
         return JSC.Node.Dirent.getConstructor(globalThis);
     }
 
+    pub fn getStats(_: *NodeJSFS, globalThis: *JSC.JSGlobalObject) callconv(.C) JSC.JSValue {
+        return JSC.Node.Stats.getConstructor(globalThis);
+    }
+
+    pub const watch = callSync(.watch);
+
     // Not implemented yet:
     const notimpl = fdatasync;
     pub const opendir = notimpl;
     pub const opendirSync = notimpl;
-    pub const readv = notimpl;
-    pub const readvSync = notimpl;
-    pub const writev = notimpl;
-    pub const writevSync = notimpl;
 };

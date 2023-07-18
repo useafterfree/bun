@@ -1,4 +1,7 @@
-type BinaryType = "arraybuffer" | "blob";
+/**
+ * "blob" is not supported yet
+ */
+type BinaryType = "nodebuffer" | "arraybuffer" | "blob";
 type Transferable = ArrayBuffer;
 type MessageEventSource = undefined;
 type Encoding = "utf-8" | "windows-1252" | "utf-16";
@@ -69,8 +72,36 @@ interface ArrayConstructor {
     asyncItems: AsyncIterable<T> | Iterable<T> | ArrayLike<T>,
     mapfn?: (value: any, index: number) => any,
     thisArg?: any,
-  ): Array<T>;
+  ): Promise<Array<T>>;
 }
+
+type UncaughtExceptionOrigin = "uncaughtException" | "unhandledRejection";
+type MultipleResolveType = "resolve" | "reject";
+type BeforeExitListener = (code: number) => void;
+type DisconnectListener = () => void;
+type ExitListener = (code: number) => void;
+type RejectionHandledListener = (promise: Promise<unknown>) => void;
+type UncaughtExceptionListener = (
+  error: Error,
+  origin: UncaughtExceptionOrigin,
+) => void;
+/**
+ * Most of the time the unhandledRejection will be an Error, but this should not be relied upon
+ * as *anything* can be thrown/rejected, it is therefore unsafe to assume that the value is an Error.
+ */
+type UnhandledRejectionListener = (
+  reason: unknown,
+  promise: Promise<unknown>,
+) => void;
+type WarningListener = (warning: Error) => void;
+type MessageListener = (message: unknown, sendHandle: unknown) => void;
+type SignalsListener = (signal: Signals) => void;
+type MultipleResolveListener = (
+  type: MultipleResolveType,
+  promise: Promise<unknown>,
+  value: unknown,
+) => void;
+// type WorkerListener = (worker: Worker) => void;
 
 interface Console {
   /**
@@ -184,6 +215,7 @@ declare namespace NodeJS {
     (id: string): any;
     resolve: RequireResolve;
   }
+  interface ProcessEnv {}
   type Signals =
     | "SIGABRT"
     | "SIGALRM"
@@ -234,31 +266,31 @@ interface ImportMeta {
    * "file:///Users/me/projects/my-app/src/my-app.ts"
    * ```
    */
-  url: string;
+  readonly url: string;
   /**
    * Absolute path to the source file
    */
-  path: string;
+  readonly path: string;
   /**
    * Absolute path to the directory containing the source file.
    *
    * Does not have a trailing slash
    */
-  dir: string;
+  readonly dir: string;
   /**
    * Filename of the source file
    */
-  file: string;
+  readonly file: string;
   /**
    * Resolve a module ID the same as if you imported it
    *
-   * On failure, throws a `ResolveError`
+   * On failure, throws a `ResolveMessage`
    */
   resolve(moduleId: string): Promise<string>;
   /**
    * Resolve a `moduleId` as though it were imported from `parent`
    *
-   * On failure, throws a `ResolveError`
+   * On failure, throws a `ResolveMessage`
    */
   // tslint:disable-next-line:unified-signatures
   resolve(moduleId: string, parent: string): Promise<string>;
@@ -284,6 +316,25 @@ interface ImportMeta {
    * relevant.
    */
   require: NodeJS.Require;
+
+  /**
+   * Did the current file start the process?
+   *
+   * @example
+   * ```ts
+   * if (import.meta.main) {
+   *  console.log("I started the process!");
+   * }
+   * ```
+   *
+   * @example
+   * ```ts
+   * console.log(
+   *   import.meta.main === (import.meta.path === Bun.main)
+   * )
+   * ```
+   */
+  readonly main: boolean;
 }
 
 /**
@@ -305,6 +356,16 @@ interface StructuredSerializeOptions {
   transfer?: Transferable[];
 }
 
+/**
+ * Creates a deep clone of an object.
+ *
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/structuredClone)
+ */
+declare function structuredClone<T>(
+  value: T,
+  options?: StructuredSerializeOptions,
+): T;
+
 interface EncodeIntoResult {
   /**
    * The read Unicode code units of input.
@@ -318,7 +379,9 @@ interface EncodeIntoResult {
 
 interface Process {
   /**
-   * The current version of Bun
+   * A Node.js LTS version
+   *
+   * To see the current Bun version, use {@link Bun.version}
    */
   version: string;
   /**
@@ -342,8 +405,10 @@ interface Process {
   arch: Architecture;
   platform: Platform;
   argv: string[];
-  // execArgv: string[];
-  env: Bun.Env;
+  execArgv: string[];
+  env: import("bun").Env;
+  allowedNodeEnvironmentFlags: Set<string>;
+  debugPort: number;
 
   /** Whether you are using Bun */
   isBun: 1; // FIXME: this should actually return a boolean
@@ -351,15 +416,28 @@ interface Process {
   revision: string;
   chdir(directory: string): void;
   cwd(): string;
-  exit(code?: number): void;
+  exit(code?: number): never;
+  reallyExit(code?: number): never;
   getgid(): number;
-  setgid(id: number | string): void;
+  // setgid(id: number | string): void;
   getuid(): number;
-  setuid(id: number | string): void;
+  // setuid(id: number | string): void;
+  geteuid: () => number;
+  // seteuid: (id: number | string) => void;
+  getegid: () => number;
+  // setegid: (id: number | string) => void;
+  getgroups: () => number[];
+  // setgroups?: (groups: ReadonlyArray<string | number>) => void;
   dlopen(module: { exports: any }, filename: string, flags?: number): void;
   stdin: import("stream").Duplex & { isTTY: boolean };
   stdout: import("stream").Writable & { isTTY: boolean };
   stderr: import("stream").Writable & { isTTY: boolean };
+
+  /**
+   *
+   * @deprecated This is deprecated; use the "node:assert" module instead.
+   */
+  assert(value: unknown, message?: string | Error): asserts value;
 
   /**
    * exit the process with a fatal exception, sending SIGABRT
@@ -391,6 +469,81 @@ interface Process {
    * @returns Bun process's file mode creation mask.
    */
   umask(mask?: number): number;
+
+  emitWarning(warning: string | Error /*name?: string, ctor?: Function*/): void;
+
+  readonly config: Object;
+
+  memoryUsage: {
+    (delta?: MemoryUsageObject): MemoryUsageObject;
+
+    rss(): number;
+  };
+
+  cpuUsage(previousValue?: CPUUsageObject): CPUUsageObject;
+
+  /**
+   * Does nothing in Bun
+   */
+  setSourceMapsEnabled(enabled: boolean): void;
+
+  kill(pid: number, signal?: string | number): void;
+
+  on(event: "beforeExit", listener: BeforeExitListener): this;
+  // on(event: "disconnect", listener: DisconnectListener): this;
+  on(event: "exit", listener: ExitListener): this;
+  // on(event: "rejectionHandled", listener: RejectionHandledListener): this;
+  // on(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+  // on(
+  //   event: "uncaughtExceptionMonitor",
+  //   listener: UncaughtExceptionListener,
+  // ): this;
+  // on(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+  // on(event: "warning", listener: WarningListener): this;
+  // on(event: "message", listener: MessageListener): this;
+  on(event: Signals, listener: SignalsListener): this;
+  // on(event: "multipleResolves", listener: MultipleResolveListener): this;
+  // on(event: "worker", listener: WorkerListener): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+  once(event: "beforeExit", listener: BeforeExitListener): this;
+  // once(event: "disconnect", listener: DisconnectListener): this;
+  once(event: "exit", listener: ExitListener): this;
+  // once(event: "rejectionHandled", listener: RejectionHandledListener): this;
+  // once(event: "uncaughtException", listener: UncaughtExceptionListener): this;
+  // once(
+  //   event: "uncaughtExceptionMonitor",
+  //   listener: UncaughtExceptionListener,
+  // ): this;
+  // once(event: "unhandledRejection", listener: UnhandledRejectionListener): this;
+  // once(event: "warning", listener: WarningListener): this;
+  // once(event: "message", listener: MessageListener): this;
+  once(event: Signals, listener: SignalsListener): this;
+  // once(event: "multipleResolves", listener: MultipleResolveListener): this;
+  // once(event: "worker", listener: WorkerListener): this;
+  once(event: string | symbol, listener: (...args: any[]) => void): this;
+
+  /**
+   * Returns the number of listeners listening for the event named `eventName`.
+   * If `listener` is provided, it will return how many times the listener is found
+   * in the list of the listeners of the event.
+   * @since v3.2.0
+   * @param eventName The name of the event being listened for
+   * @param listener The event handler function
+   */
+  listenerCount(eventName: string | symbol, listener?: Function): number;
+}
+
+interface MemoryUsageObject {
+  rss: number;
+  heapTotal: number;
+  heapUsed: number;
+  external: number;
+  arrayBuffers: number;
+}
+
+interface CPUUsageObject {
+  user: number;
+  system: number;
 }
 
 declare var process: Process;
@@ -408,9 +561,10 @@ interface BlobInterface {
   text(): Promise<string>;
   arrayBuffer(): Promise<ArrayBuffer>;
   json<TJSONReturnType = unknown>(): Promise<TJSONReturnType>;
+  formData(): Promise<FormData>;
 }
 
-type BlobPart = string | Blob | BufferSource | ArrayBuffer;
+type BlobPart = string | Blob | BufferSource;
 interface BlobPropertyBag {
   /** Set a default "type" */
   type?: string;
@@ -440,6 +594,7 @@ interface Headers {
   entries(): IterableIterator<[string, string]>;
   keys(): IterableIterator<string>;
   values(): IterableIterator<string>;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
   forEach(
     callbackfn: (value: string, key: string, parent: Headers) => void,
     thisArg?: any,
@@ -486,7 +641,11 @@ declare var Headers: {
   new (init?: HeadersInit): Headers;
 };
 
-type HeadersInit = Array<[string, string]> | Record<string, string> | Headers;
+type HeadersInit =
+  | Headers
+  | Record<string, string>
+  | Array<[string, string]>
+  | IterableIterator<[string, string]>;
 type ResponseType =
   | "basic"
   | "cors"
@@ -495,6 +654,51 @@ type ResponseType =
   | "opaque"
   | "opaqueredirect";
 
+type FormDataEntryValue = Blob | string;
+
+/** Provides a way to easily construct a set of key/value pairs representing
+ * form fields and their values, which can then be easily sent using the
+ * XMLHttpRequest.send() method. It uses the same format a form would use if the
+ * encoding type were set to "multipart/form-data".
+ */
+interface FormData {
+  /**
+   * Appends a new value onto an existing key inside a FormData object, or adds
+   * the key if it does not already exist.
+   *
+   * @param name The name of the field whose data is contained in value.
+   * @param value The field's value.
+   * @param fileName The filename reported to the server.
+   *
+   * ## Upload a file
+   * ```ts
+   * const formData = new FormData();
+   * formData.append("username", "abc123");
+   * formData.append("avatar", Bun.file("avatar.png"), "avatar.png");
+   * await fetch("https://example.com", { method: "POST", body: formData });
+   * ```
+   */
+  append(name: string, value: string | Blob, fileName?: string): void;
+  delete(name: string): void;
+  get(name: string): FormDataEntryValue | null;
+  getAll(name: string): FormDataEntryValue[];
+  has(name: string): boolean;
+  set(name: string, value: string | Blob, fileName?: string): void;
+  keys(): IterableIterator<string>;
+  values(): IterableIterator<FormDataEntryValue>;
+  entries(): IterableIterator<[string, FormDataEntryValue]>;
+  [Symbol.iterator](): IterableIterator<[string, FormDataEntryValue]>;
+  forEach(
+    callback: (value: FormDataEntryValue, key: string, parent: this) => void,
+    thisArg?: any,
+  ): void;
+}
+
+declare var FormData: {
+  prototype: FormData;
+  new (): FormData;
+};
+
 declare class Blob implements BlobInterface {
   /**
    * Create a new [Blob](https://developer.mozilla.org/en-US/docs/Web/API/Blob)
@@ -502,7 +706,7 @@ declare class Blob implements BlobInterface {
    * @param `parts` - An array of strings, numbers, BufferSource, or [Blob](https://developer.mozilla.org/en-US/docs/Web/API/Blob) objects
    * @param `options` - An object containing properties to be added to the [Blob](https://developer.mozilla.org/en-US/docs/Web/API/Blob)
    */
-  constructor(parts?: BlobPart[] | Blob, options?: BlobPropertyBag);
+  constructor(parts?: BlobPart[], options?: BlobPropertyBag);
   /**
    * Create a new view **without 🚫 copying** the underlying data.
    *
@@ -512,7 +716,29 @@ declare class Blob implements BlobInterface {
    * @param end The index that sets the end of the view.
    *
    */
-  slice(begin?: number, end?: number): Blob;
+  slice(begin?: number, end?: number, contentType?: string): Blob;
+
+  /**
+   * Create a new view **without 🚫 copying** the underlying data.
+   *
+   * Similar to [`BufferSource.subarray`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BufferSource/subarray)
+   *
+   * @param begin The index that sets the beginning of the view.
+   * @param end The index that sets the end of the view.
+   *
+   */
+  slice(begin?: number, contentType?: string): Blob;
+
+  /**
+   * Create a new view **without 🚫 copying** the underlying data.
+   *
+   * Similar to [`BufferSource.subarray`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BufferSource/subarray)
+   *
+   * @param begin The index that sets the beginning of the view.
+   * @param end The index that sets the end of the view.
+   *
+   */
+  slice(contentType?: string): Blob;
 
   /**
    * Read the data from the blob as a string. It will be decoded from UTF-8.
@@ -539,14 +765,28 @@ declare class Blob implements BlobInterface {
    */
   json<TJSONReturnType = unknown>(): Promise<TJSONReturnType>;
 
+  /**
+   * Read the data from the blob as a {@link FormData} object.
+   *
+   * This first decodes the data from UTF-8, then parses it as a
+   * `multipart/form-data` body or a `application/x-www-form-urlencoded` body.
+   *
+   * The `type` property of the blob is used to determine the format of the
+   * body.
+   *
+   * This is a non-standard addition to the `Blob` API, to make it conform more
+   * closely to the `BodyMixin` API.
+   */
+  formData(): Promise<FormData>;
+
   type: string;
-  size: number;
+  readonly size: number;
 }
 
 interface ResponseInit {
   headers?: HeadersInit;
   /** @default 200 */
-  status?: number;
+  status?: number | bigint;
 
   /** @default "OK" */
   statusText?: string;
@@ -570,7 +810,13 @@ interface ResponseInit {
  */
 declare class Response implements BlobInterface {
   constructor(
-    body?: ReadableStream | BlobPart | BlobPart[] | null,
+    body?:
+      | ReadableStream
+      | BlobPart
+      | BlobPart[]
+      | FormData
+      | URLSearchParams
+      | null,
     options?: ResponseInit,
   );
 
@@ -685,6 +931,18 @@ declare class Response implements BlobInterface {
    */
   blob(): Promise<Blob>;
 
+  /**
+   * Read the data from the Response as a {@link FormData} object.
+   *
+   * This first decodes the data from UTF-8, then parses it as a
+   * `multipart/form-data` body or a `application/x-www-form-urlencoded` body.
+   *
+   * If no `Content-Type` header is present, the promise will be rejected.
+   *
+   * @returns Promise<FormData> - The body of the response as a {@link FormData}.
+   */
+  formData(): Promise<FormData>;
+
   readonly ok: boolean;
   readonly redirected: boolean;
   /**
@@ -746,14 +1004,20 @@ type ReferrerPolicy =
   | "strict-origin"
   | "strict-origin-when-cross-origin"
   | "unsafe-url";
-type RequestInfo = Request | string;
+// type RequestInfo = Request | string | RequestInit;
 
-type BodyInit = ReadableStream | XMLHttpRequestBodyInit;
-type XMLHttpRequestBodyInit = Blob | BufferSource | string;
+type BodyInit = ReadableStream | XMLHttpRequestBodyInit | URLSearchParams;
+type XMLHttpRequestBodyInit = Blob | BufferSource | string | FormData;
 type ReadableStreamController<T> = ReadableStreamDefaultController<T>;
 type ReadableStreamDefaultReadResult<T> =
   | ReadableStreamDefaultReadValueResult<T>
   | ReadableStreamDefaultReadDoneResult;
+interface ReadableStreamDefaultReadManyResult<T> {
+  done: boolean;
+  /** Number of bytes */
+  size: number;
+  value: T[];
+}
 type ReadableStreamReader<T> = ReadableStreamDefaultReader<T>;
 
 interface RequestInit {
@@ -764,7 +1028,7 @@ interface RequestInit {
   /**
    * A string indicating how the request will interact with the browser's cache to set request's cache.
    *
-   * Note: as of Bun v0.0.74, this is not implemented yet.
+   * Note: as of Bun v0.5.7, this is not implemented yet.
    */
   cache?: RequestCache;
   /**
@@ -778,7 +1042,7 @@ interface RequestInit {
   /**
    * A cryptographic hash of the resource to be fetched by request. Sets request's integrity.
    *
-   * Note: as of Bun v0.0.74, this is not implemented yet.
+   * Note: as of Bun v0.5.7, this is not implemented yet.
    */
   integrity?: string;
   /**
@@ -811,8 +1075,6 @@ interface RequestInit {
   referrerPolicy?: ReferrerPolicy;
   /**
    * An AbortSignal to set request's signal.
-   *
-   * Note: as of Bun v0.0.74, this is not implemented yet.
    */
   signal?: AbortSignal | null;
   /**
@@ -826,6 +1088,21 @@ interface RequestInit {
    * Enable or disable HTTP request timeout
    */
   timeout?: boolean;
+}
+
+interface FetchRequestInit extends RequestInit {
+  /**
+   * Log the raw HTTP request & response to stdout. This API may be
+   * removed in a future version of Bun without notice.
+   * This is a custom property that is not part of the Fetch API specification.
+   * It exists mostly as a debugging tool
+   */
+  verbose?: boolean;
+  /**
+   * Override http_proxy or HTTPS_PROXY
+   * This is a custom property that is not part of the Fetch API specification.
+   */
+  proxy?: string;
 }
 
 /**
@@ -844,7 +1121,10 @@ interface RequestInit {
  * ```
  */
 declare class Request implements BlobInterface {
-  constructor(requestInfo: RequestInfo, requestInit?: RequestInit);
+  // Request | string | RequestInit;
+  constructor(requestInfo: string, requestInit?: RequestInit);
+  constructor(requestInfo: RequestInit & { url: string });
+  constructor(requestInfo: Request, requestInit?: RequestInit);
 
   /**
    * Read or write the HTTP headers for this request.
@@ -963,16 +1243,31 @@ declare class Request implements BlobInterface {
   readonly referrerPolicy: ReferrerPolicy;
   /**
    * Returns the signal associated with request, which is an AbortSignal object indicating whether or not request has been aborted, and its abort event handler.
-   *
-   * Note: this is **not implemented yet**. The cake is a lie.
    */
   readonly signal: AbortSignal;
 
   /** Copy the Request object into a new Request, including the body */
   clone(): Request;
+
+  /**
+   * Read the body from the Request as a {@link FormData} object.
+   *
+   * This first decodes the data from UTF-8, then parses it as a
+   * `multipart/form-data` body or a `application/x-www-form-urlencoded` body.
+   *
+   * @returns Promise<FormData> - The body of the request as a {@link FormData}.
+   */
+  formData(): Promise<FormData>;
+
+  /**
+   * Has the body of the request been read?
+   *
+   * [Request.bodyUsed](https://developer.mozilla.org/en-US/docs/Web/API/Request/bodyUsed)
+   */
+  readonly bodyUsed: boolean;
 }
 
-interface Crypto {
+declare interface Crypto {
   readonly subtle: SubtleCrypto;
 
   getRandomValues<T extends BufferSource = BufferSource>(array: T): T;
@@ -988,6 +1283,10 @@ interface Crypto {
    */
   randomUUID(): string;
 }
+declare var Crypto: {
+  prototype: Crypto;
+  new (): Crypto;
+};
 
 declare var crypto: Crypto;
 
@@ -1213,39 +1512,19 @@ declare var performance: {
  * Cancel a repeating timer by its timer ID.
  * @param id timer id
  */
-declare function clearInterval(id?: number): void;
+declare function clearInterval(id?: number | Timer): void;
 /**
  * Cancel a delayed function call by its timer ID.
  * @param id timer id
  */
-declare function clearTimeout(id?: number): void;
+declare function clearTimeout(id?: number | Timer): void;
+/**
+ * Cancel an immediate function call by its immediate ID.
+ * @param id immediate id
+ */
+declare function clearImmediate(id?: number | Timer): void;
 // declare function createImageBitmap(image: ImageBitmapSource, options?: ImageBitmapOptions): Promise<ImageBitmap>;
 // declare function createImageBitmap(image: ImageBitmapSource, sx: number, sy: number, sw: number, sh: number, options?: ImageBitmapOptions): Promise<ImageBitmap>;
-/**
- * Send a HTTP(s) request
- *
- * @param url URL string
- * @param init A structured value that contains settings for the fetch() request.
- *
- * @returns A promise that resolves to {@link Response} object.
- *
- *
- */
-declare function fetch(
-  url: string,
-  init?: RequestInit,
-  /**
-   * This is a custom property that is not part of the Fetch API specification.
-   * It exists mostly as a debugging tool
-   */
-  bunOnlyOptions?: {
-    /**
-     * Log the raw HTTP request & response to stdout. This API may be
-     * removed in a future version of Bun without notice.
-     */
-    verbose: boolean;
-  },
-): Promise<Response>;
 
 /**
  * Send a HTTP(s) request
@@ -1258,20 +1537,20 @@ declare function fetch(
  *
  */
 // tslint:disable-next-line:unified-signatures
+declare function fetch(request: Request, init?: RequestInit): Promise<Response>;
+/**
+ * Send a HTTP(s) request
+ *
+ * @param url URL string
+ * @param init A structured value that contains settings for the fetch() request.
+ *
+ * @returns A promise that resolves to {@link Response} object.
+ *
+ *
+ */
 declare function fetch(
-  request: Request,
-  init?: RequestInit,
-  /**
-   * This is a custom property that is not part of the Fetch API specification.
-   * It exists mostly as a debugging tool
-   */
-  bunOnlyOptions?: {
-    /**
-     * Log the raw HTTP request & response to stdout. This API may be
-     * removed in a future version of Bun without notice.
-     */
-    verbose: boolean;
-  },
+  url: string | URL | Request,
+  init?: FetchRequestInit,
 ): Promise<Response>;
 
 declare function queueMicrotask(callback: (...args: any[]) => void): void;
@@ -1280,6 +1559,15 @@ declare function queueMicrotask(callback: (...args: any[]) => void): void;
  * @param error Error or string
  */
 declare function reportError(error: any): void;
+
+interface Timer {
+  ref(): Timer;
+  unref(): Timer;
+  hasRef(): boolean;
+
+  [Symbol.toPrimitive](): number;
+}
+
 /**
  * Run a function immediately after main event loop is vacant
  * @param handler function to call
@@ -1287,7 +1575,7 @@ declare function reportError(error: any): void;
 declare function setImmediate(
   handler: TimerHandler,
   ...arguments: any[]
-): number;
+): Timer;
 /**
  * Run a function every `interval` milliseconds
  * @param handler function to call
@@ -1297,7 +1585,7 @@ declare function setInterval(
   handler: TimerHandler,
   interval?: number,
   ...arguments: any[]
-): number;
+): Timer;
 /**
  * Run a function after `timeout` (milliseconds)
  * @param handler function to call
@@ -1307,7 +1595,7 @@ declare function setTimeout(
   handler: TimerHandler,
   timeout?: number,
   ...arguments: any[]
-): number;
+): Timer;
 declare function addEventListener<K extends keyof EventMap>(
   type: K,
   listener: (this: object, ev: EventMap[K]) => any,
@@ -1401,7 +1689,7 @@ interface AbortController {
   /**
    * Invoking this method will set this object's AbortSignal's aborted flag and signal to any observers that the associated activity is to be aborted.
    */
-  abort(): void;
+  abort(reason?: any): void;
 }
 
 /** EventTarget is a DOM interface implemented by objects that can receive events and may have listeners for them. */
@@ -1457,7 +1745,7 @@ declare var EventTarget: {
 };
 
 /** An event which takes place in the DOM. */
-interface Event {
+interface Event<T extends EventTarget = EventTarget> {
   /**
    * Returns true or false depending on how event was initialized. True
    * if event goes through its target's ancestors in reverse tree order,
@@ -1482,7 +1770,7 @@ interface Event {
    * Returns the object whose event listener's callback is currently
    * being invoked.
    */
-  readonly currentTarget: EventTarget | null;
+  readonly currentTarget: T | null;
   /**
    * Returns true if preventDefault() was invoked successfully to
    * indicate cancelation, and false otherwise.
@@ -1621,98 +1909,287 @@ declare var MessageEvent: {
   new <T>(type: string, eventInitDict?: MessageEventInit<T>): MessageEvent<T>;
 };
 
-/**
- * An implementation of the [WebSocket API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)
- */
-interface WebSocketEventMap {
-  close: CloseEvent;
-  error: Event;
-  message: MessageEvent;
-  open: Event;
+interface CustomEventInit<T = any> extends EventInit {
+  detail?: T;
 }
 
-/** Provides the API for creating and managing a WebSocket connection to a server, as well as for sending and receiving data on the connection. */
+interface CustomEvent<T = any> extends Event {
+  /** Returns any custom data event was created with. Typically used for synthetic events. */
+  readonly detail: T;
+  /** @deprecated */
+  initCustomEvent(
+    type: string,
+    bubbles?: boolean,
+    cancelable?: boolean,
+    detail?: T,
+  ): void;
+}
+
+declare var CustomEvent: {
+  prototype: CustomEvent;
+  new <T>(type: string, eventInitDict?: CustomEventInit<T>): CustomEvent<T>;
+};
+
+/**
+ * A map of WebSocket event names to event types.
+ */
+type WebSocketEventMap = {
+  open: Event;
+  message: MessageEvent<string | Buffer>;
+  close: CloseEvent;
+  ping: MessageEvent<Buffer>;
+  pong: MessageEvent<Buffer>;
+  error: Event;
+};
+
+/**
+ * A state that represents if a WebSocket is connected.
+ *
+ * - `WebSocket.CONNECTING` is `0`, the connection is pending.
+ * - `WebSocket.OPEN` is `1`, the connection is established and `send()` is possible.
+ * - `WebSocket.CLOSING` is `2`, the connection is closing.
+ * - `WebSocket.CLOSED` is `3`, the connection is closed or couldn't be opened.
+ *
+ * @link https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/readyState
+ */
+type WebSocketReadyState = 0 | 1 | 2 | 3;
+
+/**
+ * A client that makes an outgoing WebSocket connection.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+ * @example
+ * const ws = new WebSocket("wss://ws.postman-echo.com/raw");
+ *
+ * ws.addEventListener("open", () => {
+ *   console.log("Connected");
+ * });
+ * ws.addEventListener("message", ({ data }) => {
+ *   console.log("Received:", data); // string or Buffer
+ * });
+ * ws.addEventListener("close", ({ code, reason }) => {
+ *   console.log("Disconnected:", code, reason);
+ * });
+ */
 interface WebSocket extends EventTarget {
   /**
-   * Returns a string that indicates how binary data from the WebSocket object is exposed to scripts:
+   * Sends a message.
    *
-   * Can be set, to change how binary data is returned. The default is "blob".
+   * @param data the string, ArrayBuffer, or ArrayBufferView to send
+   * @example
+   * let ws: WebSocket;
+   * ws.send("Hello!");
+   * ws.send(new TextEncoder().encode("Hello?"));
+   */
+  send(data: string | BufferSource): void;
+
+  /**
+   * Closes the connection.
+   *
+   * Here is a list of close codes:
+   * - `1000` means "normal closure" **(default)**
+   * - `1001` means the client is "going away"
+   * - `1009` means a message was too big and was rejected
+   * - `1011` means the server encountered an error
+   * - `1012` means the server is restarting
+   * - `1013` means the server is too busy or the client is rate-limited
+   * - `4000` through `4999` are reserved for applications (you can use it!)
+   *
+   * To abruptly close the connection without a code, use `terminate()` instead.
+   *
+   * @param code the close code
+   * @param reason the close reason
+   * @example
+   * let ws: WebSocket;
+   * ws.close(1013, "Exceeded the rate limit of 100 messages per minute.");
+   */
+  close(code?: number, reason?: string): void;
+
+  /**
+   * Closes the connection, abruptly.
+   *
+   * To gracefuly close the connection, use `close()` instead.
+   */
+  terminate(): void;
+
+  /**
+   * Sends a ping.
+   *
+   * @param data the string, ArrayBuffer, or ArrayBufferView to send
+   */
+  ping(data?: string | BufferSource): void;
+
+  /**
+   * Sends a pong.
+   *
+   * @param data the string, ArrayBuffer, or ArrayBufferView to send
+   */
+  pong(data?: string | BufferSource): void;
+
+  /**
+   * Sets how binary data is returned in events.
+   *
+   * - if `nodebuffer`, binary data is returned as `Buffer` objects. **(default)**
+   * - if `arraybuffer`, binary data is returned as `ArrayBuffer` objects.
+   * - if `blob`, binary data is returned as `Blob` objects. **(not supported)**
+   *
+   * In browsers, the default is `blob`, however in Bun, the default is `nodebuffer`.
+   *
+   * @example
+   * let ws: WebSocket;
+   * ws.binaryType = "arraybuffer";
+   * ws.addEventListener("message", ({ data }) => {
+   *   console.log(data instanceof ArrayBuffer); // true
+   * });
    */
   binaryType: BinaryType;
+
   /**
-   * Returns the number of bytes of application data (UTF-8 text and binary data) that have been queued using send() but not yet been transmitted to the network.
+   * The ready state of the connection.
    *
-   * If the WebSocket connection is closed, this attribute's value will only increase with each call to the send() method. (The number does not reset to zero once the connection closes.)
+   * - `WebSocket.CONNECTING` is `0`, the connection is pending.
+   * - `WebSocket.OPEN` is `1`, the connection is established and `send()` is possible.
+   * - `WebSocket.CLOSING` is `2`, the connection is closing.
+   * - `WebSocket.CLOSED` is `3`, the connection is closed or couldn't be opened.
+   */
+  readonly readyState: WebSocketReadyState;
+
+  /**
+   * The resolved URL that established the connection.
+   */
+  readonly url: string;
+
+  /**
+   * The number of bytes that are queued, but not yet sent.
+   *
+   * When the connection is closed, the value is not reset to zero.
    */
   readonly bufferedAmount: number;
-  /** Returns the extensions selected by the server, if any. */
-  readonly extensions: string;
-  onclose: ((this: WebSocket, ev: CloseEvent) => any) | null;
-  onerror: ((this: WebSocket, ev: Event) => any) | null;
-  onmessage: ((this: WebSocket, ev: MessageEvent) => any) | null;
-  onopen: ((this: WebSocket, ev: Event) => any) | null;
-  /** Returns the subprotocol selected by the server, if any. It can be used in conjunction with the array form of the constructor's second argument to perform subprotocol negotiation. */
+
+  /**
+   * The protocol selected by the server, if any, otherwise empty.
+   */
   readonly protocol: string;
-  /** Returns the state of the WebSocket object's connection. It can have the values described below. */
-  readonly readyState: number;
-  /** Returns the URL that was used to establish the WebSocket connection. */
-  readonly url: string;
-  /** Closes the WebSocket connection, optionally using code as the the WebSocket connection close code and reason as the the WebSocket connection close reason. */
-  close(code?: number, reason?: string): void;
-  /** Transmits data using the WebSocket connection. data can be a string, an ArrayBuffer, or an BufferSource. */
-  send(data: string | ArrayBufferLike | BufferSource): void;
-  readonly CLOSED: number;
-  readonly CLOSING: number;
-  readonly CONNECTING: number;
-  readonly OPEN: number;
-  addEventListener<K extends keyof WebSocketEventMap>(
-    type: K,
-    listener: (this: WebSocket, ev: WebSocketEventMap[K]) => any,
+
+  /**
+   * The extensions selected by the server, if any, otherwise empty.
+   */
+  readonly extensions: string;
+
+  /**
+   * Sets the event handler for `open` events.
+   *
+   * If you need multiple event handlers, use `addEventListener("open")` instead.
+   */
+  onopen: ((this: WebSocket, ev: Event) => unknown) | null;
+
+  /**
+   * Sets the event handler for `close` events.
+   *
+   * If you need multiple event handlers, use `addEventListener("close")` instead.
+   */
+  onclose: ((this: WebSocket, event: CloseEvent) => unknown) | null;
+
+  /**
+   * Sets the event handler for `message` events.
+   *
+   * If you need multiple event handlers, use `addEventListener("message")` instead.
+   */
+  onmessage:
+    | ((this: WebSocket, event: MessageEvent<string | Buffer>) => unknown)
+    | null;
+
+  /**
+   * Sets the event handler for `error` events.
+   *
+   * If you need multiple event handlers, use `addEventListener("error")` instead.
+   */
+  onerror: ((this: WebSocket, event: Event) => unknown) | null;
+
+  addEventListener<T extends keyof WebSocketEventMap>(
+    type: T,
+    listener: (this: WebSocket, event: WebSocketEventMap[T]) => unknown,
     options?: boolean | AddEventListenerOptions,
   ): void;
+
   addEventListener(
     type: string,
-    listener: EventListenerOrEventListenerObject,
+    listener: (this: WebSocket, event: Event) => unknown,
     options?: boolean | AddEventListenerOptions,
   ): void;
-  removeEventListener<K extends keyof WebSocketEventMap>(
-    type: K,
-    listener: (this: WebSocket, ev: WebSocketEventMap[K]) => any,
+
+  removeEventListener<T extends keyof WebSocketEventMap>(
+    type: T,
+    listener: (this: WebSocket, event: WebSocketEventMap[T]) => unknown,
     options?: boolean | EventListenerOptions,
   ): void;
+
   removeEventListener(
     type: string,
-    listener: EventListenerOrEventListenerObject,
+    listener: (this: WebSocket, event: Event) => unknown,
     options?: boolean | EventListenerOptions,
   ): void;
 }
 
+/**
+ * A client that makes an outgoing WebSocket connection.
+ *
+ * @see https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+ * @example
+ * const ws = new WebSocket("wss://ws.postman-echo.com/raw");
+ *
+ * ws.addEventListener("open", () => {
+ *   console.log("Connected");
+ * });
+ * ws.addEventListener("message", ({ data }) => {
+ *   console.log("Received:", data); // string or Buffer
+ * });
+ * ws.addEventListener("close", ({ code, reason }) => {
+ *   console.log("Disconnected:", code, reason);
+ * });
+ */
 declare var WebSocket: {
   prototype: WebSocket;
+
   new (url: string | URL, protocols?: string | string[]): WebSocket;
+
   new (
     url: string | URL,
     options: {
       /**
-       * An object specifying connection headers
-       *
-       * This is a Bun-specific extension.
+       * Sets the headers when establishing a connection.
        */
       headers?: HeadersInit;
       /**
-       * A string specifying the subprotocols the server is willing to accept.
+       * Sets the sub-protocol the client is willing to accept.
        */
       protocol?: string;
       /**
-       * A string array specifying the subprotocols the server is willing to accept.
+       * Sets the sub-protocols the client is willing to accept.
        */
       protocols?: string[];
     },
   ): WebSocket;
-  readonly CLOSED: number;
-  readonly CLOSING: number;
-  readonly CONNECTING: number;
-  readonly OPEN: number;
+
+  /**
+   * The connection is pending.
+   */
+  readonly CONNECTING: 0;
+
+  /**
+   * The connection is established and `send()` is possible.
+   */
+  readonly OPEN: 1;
+
+  /**
+   * The connection is closing.
+   */
+  readonly CLOSING: 2;
+
+  /**
+   * The connection is closed or couldn't be opened.
+   */
+  readonly CLOSED: 3;
 };
 
 /**
@@ -1761,6 +2238,7 @@ interface URLSearchParams {
   ): void;
   /** Returns a string containing a query string suitable for use in a URL. Does not include the question mark. */
   toString(): string;
+  [Symbol.iterator](): IterableIterator<[string, string]>;
 }
 
 declare var URLSearchParams: {
@@ -1805,11 +2283,13 @@ interface FetchEvent extends Event {
 
 interface EventMap {
   fetch: FetchEvent;
+  message: MessageEvent;
+  messageerror: MessageEvent;
   // exit: Event;
 }
 
 interface AbortSignalEventMap {
-  abort: Event;
+  abort: Event<AbortSignal>;
 }
 
 interface AddEventListenerOptions extends EventListenerOptions {
@@ -1824,6 +2304,12 @@ interface AbortSignal extends EventTarget {
    * Returns true if this AbortSignal's AbortController has signaled to abort, and false otherwise.
    */
   readonly aborted: boolean;
+
+  /**
+   * The reason the signal aborted, or undefined if not aborted.
+   */
+  readonly reason: any;
+
   onabort: ((this: AbortSignal, ev: Event) => any) | null;
   addEventListener<K extends keyof AbortSignalEventMap>(
     type: K,
@@ -1850,11 +2336,28 @@ interface AbortSignal extends EventTarget {
 declare var AbortSignal: {
   prototype: AbortSignal;
   new (): AbortSignal;
+  abort(reason?: any): AbortSignal;
+  /**
+   * Create an AbortSignal which times out after milliseconds
+   *
+   * @param milliseconds the number of milliseconds to delay until {@link AbortSignal.prototype.signal()} is called
+   *
+   * @example
+   *
+   * ## Timeout a `fetch()` request
+   *
+   * ```ts
+   * await fetch("https://example.com", {
+   *    signal: AbortSignal.timeout(100)
+   * })
+   * ```
+   */
+  timeout(milliseconds: number): AbortSignal;
 };
 
 // type AlgorithmIdentifier = Algorithm | string;
 // type BodyInit = ReadableStream | XMLHttpRequestBodyInit;
-type BufferSource = ArrayBufferView | ArrayBuffer | SharedArrayBuffer;
+type BufferSource = TypedArray | DataView | ArrayBufferLike;
 // type COSEAlgorithmIdentifier = number;
 // type CSSNumberish = number;
 // type CanvasImageSource =
@@ -1880,7 +2383,6 @@ type EventListenerOrEventListenerObject = EventListener | EventListenerObject;
  * "/node_modules.server.bun".
  *
  * Bun may inject additional imports into your code. This usually has a `bun:` prefix.
- *
  */
 declare var Loader: {
   /**
@@ -1903,25 +2405,34 @@ declare var Loader: {
    *
    * Virtual modules and JS polyfills are embedded in bun's binary. They don't
    * point to anywhere in your local filesystem.
-   *
-   *
    */
   registry: Map<
     string,
     {
+      key: string;
       /**
        * This refers to the state the ESM module is in
        *
        * TODO: make an enum for this number
-       *
-       *
        */
       state: number;
-      dependencies: string[];
+      fetch: Promise<any>;
+      instantiate: Promise<any>;
+      satisfy: Promise<any>;
+      dependencies: Array<
+        (typeof Loader)["registry"] extends Map<any, infer V> ? V : any
+      >;
       /**
        * Your application will probably crash if you mess with this.
        */
-      module: any;
+      module: {
+        dependenciesMap: (typeof Loader)["registry"];
+      };
+      linkError?: any;
+      linkSucceeded: boolean;
+      evaluated: boolean;
+      then?: any;
+      isAsync: boolean;
     }
   >;
   /**
@@ -1988,7 +2499,11 @@ interface ReadableStream<R = any> {
 declare var ReadableStream: {
   prototype: ReadableStream;
   new <R = any>(
-    underlyingSource?: DirectUnderlyingSource<R> | UnderlyingSource<R>,
+    underlyingSource?: UnderlyingSource<R>,
+    strategy?: QueuingStrategy<R>,
+  ): ReadableStream<R>;
+  new <R = any>(
+    underlyingSource?: DirectUnderlyingSource<R>,
     strategy?: QueuingStrategy<R>,
   ): ReadableStream<R>;
 };
@@ -2041,6 +2556,8 @@ declare var ReadableStreamDefaultController: {
 interface ReadableStreamDefaultReader<R = any>
   extends ReadableStreamGenericReader {
   read(): Promise<ReadableStreamDefaultReadResult<R>>;
+  /** Only available in Bun. If there are multiple chunks in the queue, this will return all of them at the same time. */
+  readMany(): Promise<ReadableStreamDefaultReadManyResult<R>>;
   releaseLock(): void;
 }
 
@@ -2168,6 +2685,9 @@ interface UnderlyingSource<R = any> {
   cancel?: UnderlyingSourceCancelCallback;
   pull?: UnderlyingSourcePullCallback<R>;
   start?: UnderlyingSourceStartCallback<R>;
+  /**
+   * Mode "bytes" is not currently supported.
+   */
   type?: undefined;
 }
 
@@ -2280,6 +2800,43 @@ interface ErrnoException extends Error {
   path?: string | undefined;
   syscall?: string | undefined;
 }
+
+/** An abnormal event (called an exception) which occurs as a result of calling a method or accessing a property of a web API. */
+interface DOMException extends Error {
+  /** @deprecated */
+  readonly code: number;
+  readonly message: string;
+  readonly name: string;
+  readonly ABORT_ERR: number;
+  readonly DATA_CLONE_ERR: number;
+  readonly DOMSTRING_SIZE_ERR: number;
+  readonly HIERARCHY_REQUEST_ERR: number;
+  readonly INDEX_SIZE_ERR: number;
+  readonly INUSE_ATTRIBUTE_ERR: number;
+  readonly INVALID_ACCESS_ERR: number;
+  readonly INVALID_CHARACTER_ERR: number;
+  readonly INVALID_MODIFICATION_ERR: number;
+  readonly INVALID_NODE_TYPE_ERR: number;
+  readonly INVALID_STATE_ERR: number;
+  readonly NAMESPACE_ERR: number;
+  readonly NETWORK_ERR: number;
+  readonly NOT_FOUND_ERR: number;
+  readonly NOT_SUPPORTED_ERR: number;
+  readonly NO_DATA_ALLOWED_ERR: number;
+  readonly NO_MODIFICATION_ALLOWED_ERR: number;
+  readonly QUOTA_EXCEEDED_ERR: number;
+  readonly SECURITY_ERR: number;
+  readonly SYNTAX_ERR: number;
+  readonly TIMEOUT_ERR: number;
+  readonly TYPE_MISMATCH_ERR: number;
+  readonly URL_MISMATCH_ERR: number;
+  readonly VALIDATION_ERR: number;
+  readonly WRONG_DOCUMENT_ERR: number;
+}
+declare var DOMException: {
+  prototype: DOMException;
+  new (message?: string, name?: string): DOMException;
+};
 
 declare function alert(message?: string): void;
 declare function confirm(message?: string): boolean;
@@ -2623,12 +3180,12 @@ interface Position {
   offset: number;
 }
 
-interface ResolveError {
+declare class ResolveMessage {
+  readonly name: "ResolveMessage";
   readonly position: Position | null;
   readonly code: string;
   readonly message: string;
   readonly referrer: string;
-  readonly name: string;
   readonly specifier: string;
   readonly importKind:
     | "entry_point"
@@ -2641,23 +3198,27 @@ interface ResolveError {
     | "at_conditional"
     | "url"
     | "internal";
+  readonly level: "error" | "warning" | "info" | "debug" | "verbose";
 
   toString(): string;
 }
 
-declare var ResolveError: {
-  readonly protoype: ResolveError;
-};
-
-interface BuildError {
+declare class BuildMessage {
+  readonly name: "BuildMessage";
   readonly position: Position | null;
   readonly message: string;
-  readonly name: string;
+  readonly level: "error" | "warning" | "info" | "debug" | "verbose";
 }
 
-declare var BuildError: {
-  readonly protoype: BuildError;
-};
+/**
+ * @deprecated Renamed to `BuildMessage`
+ */
+declare var BuildError: typeof BuildMessage;
+
+/**
+ * @deprecated Renamed to `ResolveMessage`
+ */
+declare var ResolveError: typeof ResolveMessage;
 
 // Declare "static" methods in Error
 interface ErrorConstructor {
@@ -2776,3 +3337,310 @@ interface SharedArrayBuffer {
    */
   grow(size: number): SharedArrayBuffer;
 }
+
+declare namespace WebAssembly {
+  interface CompileError extends Error {}
+
+  var CompileError: {
+    prototype: CompileError;
+    new (message?: string): CompileError;
+    (message?: string): CompileError;
+  };
+
+  interface Global {
+    value: any;
+    valueOf(): any;
+  }
+
+  var Global: {
+    prototype: Global;
+    new (descriptor: GlobalDescriptor, v?: any): Global;
+  };
+
+  interface Instance {
+    readonly exports: Exports;
+  }
+
+  var Instance: {
+    prototype: Instance;
+    new (module: Module, importObject?: Imports): Instance;
+  };
+
+  interface LinkError extends Error {}
+
+  var LinkError: {
+    prototype: LinkError;
+    new (message?: string): LinkError;
+    (message?: string): LinkError;
+  };
+
+  interface Memory {
+    readonly buffer: ArrayBuffer;
+    grow(delta: number): number;
+  }
+
+  var Memory: {
+    prototype: Memory;
+    new (descriptor: MemoryDescriptor): Memory;
+  };
+
+  interface Module {}
+
+  var Module: {
+    prototype: Module;
+    new (bytes: BufferSource): Module;
+    customSections(moduleObject: Module, sectionName: string): ArrayBuffer[];
+    exports(moduleObject: Module): ModuleExportDescriptor[];
+    imports(moduleObject: Module): ModuleImportDescriptor[];
+  };
+
+  interface RuntimeError extends Error {}
+
+  var RuntimeError: {
+    prototype: RuntimeError;
+    new (message?: string): RuntimeError;
+    (message?: string): RuntimeError;
+  };
+
+  interface Table {
+    readonly length: number;
+    get(index: number): any;
+    grow(delta: number, value?: any): number;
+    set(index: number, value?: any): void;
+  }
+
+  var Table: {
+    prototype: Table;
+    new (descriptor: TableDescriptor, value?: any): Table;
+  };
+
+  interface GlobalDescriptor {
+    mutable?: boolean;
+    value: ValueType;
+  }
+
+  interface MemoryDescriptor {
+    initial: number;
+    maximum?: number;
+    shared?: boolean;
+  }
+
+  interface ModuleExportDescriptor {
+    kind: ImportExportKind;
+    name: string;
+  }
+
+  interface ModuleImportDescriptor {
+    kind: ImportExportKind;
+    module: string;
+    name: string;
+  }
+
+  interface TableDescriptor {
+    element: TableKind;
+    initial: number;
+    maximum?: number;
+  }
+
+  interface WebAssemblyInstantiatedSource {
+    instance: Instance;
+    module: Module;
+  }
+
+  type ImportExportKind = "function" | "global" | "memory" | "table";
+  type TableKind = "anyfunc" | "externref";
+  type ValueType =
+    | "anyfunc"
+    | "externref"
+    | "f32"
+    | "f64"
+    | "i32"
+    | "i64"
+    | "v128";
+  type ExportValue = Function | Global | Memory | Table;
+  type Exports = Record<string, ExportValue>;
+  type ImportValue = ExportValue | number;
+  type Imports = Record<string, ModuleImports>;
+  type ModuleImports = Record<string, ImportValue>;
+  function compile(bytes: BufferSource): Promise<Module>;
+  // function compileStreaming(source: Response | PromiseLike<Response>): Promise<Module>;
+  function instantiate(
+    bytes: BufferSource,
+    importObject?: Imports,
+  ): Promise<WebAssemblyInstantiatedSource>;
+  function instantiate(
+    moduleObject: Module,
+    importObject?: Imports,
+  ): Promise<Instance>;
+  // function instantiateStreaming(
+  //   source: Response | PromiseLike<Response>,
+  //   importObject?: Imports,
+  // ): Promise<WebAssemblyInstantiatedSource>;
+  function validate(bytes: BufferSource): boolean;
+}
+
+interface NodeModule {
+  exports: any;
+}
+
+declare var module: NodeModule;
+
+// Same as module.exports
+declare var exports: any;
+declare var global: typeof globalThis;
+
+declare module "*.txt" {
+  var text: string;
+  export = text;
+}
+
+interface EventSourceEventMap {
+  error: Event;
+  message: MessageEvent;
+  open: Event;
+}
+
+interface Worker extends EventTarget {
+  onerror: ((this: Worker, ev: ErrorEvent) => any) | null;
+  onmessage: ((this: Worker, ev: MessageEvent) => any) | null;
+  onmessageerror: ((this: Worker, ev: MessageEvent) => any) | null;
+
+  addEventListener<K extends keyof WorkerEventMap>(
+    type: K,
+    listener: (this: Worker, ev: WorkerEventMap[K]) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+
+  removeEventListener<K extends keyof WorkerEventMap>(
+    type: K,
+    listener: (this: Worker, ev: WorkerEventMap[K]) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+
+  terminate(): void;
+
+  postMessage(message: any, transfer?: Transferable[]): void;
+
+  /**
+   * Keep the process alive until the worker is terminated or `unref`'d
+   */
+  ref(): void;
+  /**
+   * Undo a previous `ref()`
+   */
+  unref(): void;
+}
+
+/**
+ * Post a message to the parent thread.
+ *
+ * Only useful in a worker thread; calling this from the main thread does nothing.
+ */
+declare function postMessage(message: any, transfer?: Transferable[]): void;
+
+declare var Worker: {
+  prototype: Worker;
+  new (stringUrl: string | URL, options?: WorkerOptions): Worker;
+};
+
+interface WorkerOptions {
+  name?: string;
+  bun?: {
+    /**
+     * Use less memory, but make the worker slower.
+     *
+     * Internally, this sets the heap size configuration in JavaScriptCore to be
+     * the small heap instead of the large heap.
+     */
+    smol?: boolean;
+
+    /**
+     * When `true`, the worker will keep the parent thread alive until the worker is terminated or `unref`'d.
+     * When `false`, the worker will not keep the parent thread alive.
+     *
+     * By default, this is `false`.
+     */
+    ref?: boolean;
+  };
+}
+
+interface WorkerEventMap {
+  message: MessageEvent;
+  messageerror: MessageEvent;
+  error: ErrorEvent;
+  open: Event;
+  close: Event;
+}
+
+interface EventSource extends EventTarget {
+  onerror: ((this: EventSource, ev: ErrorEvent) => any) | null;
+  onmessage: ((this: EventSource, ev: MessageEvent) => any) | null;
+  onopen: ((this: EventSource, ev: Event) => any) | null;
+  /** Returns the state of this EventSource object's connection. It can have the values described below. */
+  readonly readyState: number;
+  /** Returns the URL providing the event stream. */
+  readonly url: string;
+  /** Returns true if the credentials mode for connection requests to the URL providing the event stream is set to "include", and false otherwise.
+   *
+   * Not supported in Bun
+   *
+   */
+  readonly withCredentials: boolean;
+  /** Aborts any instances of the fetch algorithm started for this EventSource object, and sets the readyState attribute to CLOSED. */
+  close(): void;
+  readonly CLOSED: number;
+  readonly CONNECTING: number;
+  readonly OPEN: number;
+  addEventListener<K extends keyof EventSourceEventMap>(
+    type: K,
+    listener: (this: EventSource, ev: EventSourceEventMap[K]) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(
+    type: string,
+    listener: (this: EventSource, event: MessageEvent) => any,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): void;
+  removeEventListener<K extends keyof EventSourceEventMap>(
+    type: K,
+    listener: (this: EventSource, ev: EventSourceEventMap[K]) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: (this: EventSource, event: MessageEvent) => any,
+    options?: boolean | EventListenerOptions,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ): void;
+
+  /**
+   * Keep the event loop alive while connection is open or reconnecting
+   *
+   * Not available in browsers
+   */
+  ref(): void;
+
+  /**
+   * Do not keep the event loop alive while connection is open or reconnecting
+   *
+   * Not available in browsers
+   */
+  unref(): void;
+}
+
+declare var EventSource: {
+  prototype: EventSource;
+  new (url: string | URL, eventSourceInitDict?: EventSourceInit): EventSource;
+  readonly CLOSED: number;
+  readonly CONNECTING: number;
+  readonly OPEN: number;
+};

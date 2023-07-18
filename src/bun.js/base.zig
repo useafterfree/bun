@@ -1,6 +1,6 @@
-pub const js = @import("bun").JSC.C;
+pub const js = @import("root").bun.JSC.C;
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -11,9 +11,7 @@ const stringZ = bun.stringZ;
 const default_allocator = bun.default_allocator;
 const C = bun.C;
 const JavaScript = @import("./javascript.zig");
-const ResolveError = JavaScript.ResolveError;
-const BuildError = JavaScript.BuildError;
-const JSC = @import("bun").JSC;
+const JSC = @import("root").bun.JSC;
 const WebCore = @import("./webcore.zig");
 const Test = @import("./test/jest.zig");
 const Fetch = WebCore.Fetch;
@@ -22,7 +20,7 @@ const Request = WebCore.Request;
 const Router = @import("./api/filesystem_router.zig");
 const FetchEvent = WebCore.FetchEvent;
 const IdentityContext = @import("../identity_context.zig").IdentityContext;
-const uws = @import("bun").uws;
+const uws = @import("root").bun.uws;
 const Body = WebCore.Body;
 const TaggedPointerTypes = @import("../tagged_pointer.zig");
 const TaggedPointerUnion = TaggedPointerTypes.TaggedPointerUnion;
@@ -35,7 +33,51 @@ fn ObjectPtrType(comptime Type: type) type {
     return *Type;
 }
 
+const Internal = struct {
+    pub fn toJSWithType(globalThis: *JSC.JSGlobalObject, comptime Type: type, value: Type, exception: JSC.C.ExceptionRef) JSValue {
+        // TODO: refactor withType to use this instead of the other way around
+        return JSC.JSValue.c(To.JS.withType(Type, value, globalThis, exception));
+    }
+
+    pub fn toJS(globalThis: *JSC.JSGlobalObject, value: anytype, exception: JSC.C.ExceptionRef) JSValue {
+        return toJSWithType(globalThis, @TypeOf(value), value, exception);
+    }
+};
+
+pub usingnamespace Internal;
+
 pub const To = struct {
+    pub const Cpp = struct {
+        pub fn PropertyGetter(
+            comptime Type: type,
+        ) type {
+            return comptime fn (
+                this: ObjectPtrType(Type),
+                globalThis: *JSC.JSGlobalObject,
+            ) callconv(.C) JSC.JSValue;
+        }
+
+        const toJS = Internal.toJSWithType;
+
+        pub fn GetterFn(comptime Type: type, comptime decl: std.meta.DeclEnum(Type)) PropertyGetter(Type) {
+            return struct {
+                pub fn getter(
+                    this: ObjectPtrType(Type),
+                    globalThis: *JSC.JSGlobalObject,
+                ) callconv(.C) JSC.JSValue {
+                    var exception_ref = [_]JSC.C.JSValueRef{null};
+                    var exception: JSC.C.ExceptionRef = &exception_ref;
+                    const result = toJS(globalThis, @call(.auto, @field(Type, @tagName(decl)), .{this}), exception);
+                    if (exception.* != null) {
+                        globalThis.throwValue(JSC.JSValue.c(exception.*));
+                        return .zero;
+                    }
+
+                    return result;
+                }
+            }.getter;
+        }
+    };
     pub const JS = struct {
         pub inline fn str(_: anytype, val: anytype) js.JSStringRef {
             return js.JSStringCreateWithUTF8CString(val[0.. :0]);
@@ -151,6 +193,29 @@ pub const To = struct {
 
                     break :brk val.asObjectRef();
                 },
+                []const JSC.ZigString => {
+                    var array = JSC.JSValue.createStringArray(context.ptr(), value.ptr, value.len, clone).asObjectRef();
+                    const values: []const JSC.ZigString = value;
+                    defer bun.default_allocator.free(values);
+                    if (clone) {
+                        for (values) |out| {
+                            if (out.isGloballyAllocated()) {
+                                out.deinitGlobal();
+                            }
+                        }
+                    }
+
+                    return array;
+                },
+                []const bun.String => {
+                    defer {
+                        for (value) |out| {
+                            out.deref();
+                        }
+                        bun.default_allocator.free(value);
+                    }
+                    return bun.String.toJSArray(context, value).asObjectRef();
+                },
                 []const PathString, []const []const u8, []const []u8, [][]const u8, [][:0]const u8, [][:0]u8 => {
                     if (value.len == 0)
                         return JSC.C.JSObjectMakeArray(context, 0, null, exception);
@@ -161,7 +226,7 @@ pub const To = struct {
                     var zig_strings = allocator.alloc(ZigString, value.len) catch unreachable;
                     defer if (stack_fallback.fixed_buffer_allocator.end_index >= 511) allocator.free(zig_strings);
 
-                    for (value) |path_string, i| {
+                    for (value, 0..) |path_string, i| {
                         if (comptime Type == []const PathString) {
                             zig_strings[i] = ZigString.init(path_string.slice());
                         } else {
@@ -207,7 +272,7 @@ pub const To = struct {
                         if (value.len <= prefill) {
                             var array: [prefill]JSC.C.JSValueRef = undefined;
                             var i: u8 = 0;
-                            const len = @min(@intCast(u8, value.len), prefill);
+                            const len = @min(@as(u8, @intCast(value.len)), prefill);
                             while (i < len and exception.* == null) : (i += 1) {
                                 array[i] = if (comptime Child == JSC.C.JSValueRef)
                                     value[i]
@@ -364,7 +429,7 @@ pub const To = struct {
                         );
                     } else if (comptime ZigContextType == void) {
                         return ctxfn(
-                            void{},
+                            {},
                             ctx,
                             function,
                             thisObject,
@@ -587,7 +652,7 @@ pub const d = struct {
 
                     comptime {
                         var args: string = "";
-                        for (func.args) |a, i| {
+                        for (func.args, 0..) |a, i| {
                             if (i > 0) {
                                 args = args ++ ", ";
                             }
@@ -622,7 +687,7 @@ pub const d = struct {
 
                     comptime {
                         var args: string = "";
-                        for (func.args) |a, i| {
+                        for (func.args, 0..) |a, i| {
                             if (i > 0) {
                                 args = args ++ ", ";
                             }
@@ -693,7 +758,7 @@ pub const d = struct {
 
                         indent += indent_level;
 
-                        for (klass.properties) |property, i| {
+                        for (klass.properties, 0..) |property, i| {
                             if (i > 0) {
                                 buf = buf ++ "\n";
                             }
@@ -703,7 +768,7 @@ pub const d = struct {
 
                         buf = buf ++ "\n";
 
-                        for (klass.functions) |func, i| {
+                        for (klass.functions, 0..) |func, i| {
                             if (i > 0) {
                                 buf = buf ++ "\n";
                             }
@@ -715,7 +780,7 @@ pub const d = struct {
                             );
                         }
 
-                        for (klass.classes) |func, i| {
+                        for (klass.classes, 0..) |func, i| {
                             if (i > 0) {
                                 buf = buf ++ "\n";
                             }
@@ -764,7 +829,7 @@ pub const d = struct {
                             );
                         }
 
-                        for (klass.properties) |property, i| {
+                        for (klass.properties, 0..) |property, i| {
                             if (i > 0 or did_print_constructor) {
                                 buf = buf ++ "\n";
                             }
@@ -774,7 +839,7 @@ pub const d = struct {
 
                         buf = buf ++ "\n";
 
-                        for (klass.functions) |func, i| {
+                        for (klass.functions, 0..) |func, i| {
                             if (i > 0) {
                                 buf = buf ++ "\n";
                             }
@@ -1082,7 +1147,7 @@ pub fn NewClassWithInstanceType(
                     prop: js.JSStringRef,
                     exception: js.ExceptionRef,
                 ) callconv(.C) js.JSValueRef {
-                    var this: ObjectPtrType(ZigType) = if (comptime ZigType == void) void{} else GetJSPrivateData(ZigType, obj) orelse return js.JSValueMakeUndefined(ctx);
+                    var this: ObjectPtrType(ZigType) = if (comptime ZigType == void) {} else GetJSPrivateData(ZigType, obj) orelse return js.JSValueMakeUndefined(ctx);
 
                     const Field = @TypeOf(@field(
                         properties,
@@ -1226,23 +1291,27 @@ pub fn NewClassWithInstanceType(
 
         const static_properties: [property_names.len + 1]js.JSStaticValue = brk: {
             var props: [property_names.len + 1]js.JSStaticValue = undefined;
-            std.mem.set(
-                js.JSStaticValue,
+            @memset(
                 &props,
                 js.JSStaticValue{
-                    .name = @intToPtr([*c]const u8, 0),
+                    .name = @as([*c]const u8, @ptrFromInt(0)),
                     .getProperty = null,
                     .setProperty = null,
                     .attributes = js.JSPropertyAttributes.kJSPropertyAttributeNone,
                 },
             );
-            for (property_name_literals) |lit, i| {
+            if (property_name_literals.len > 0 and @TypeOf(property_name_literals[0]) == [:0]const u8) {
+                @compileError("@typeInfo() struct field names are null-terminated");
+            }
+            for (property_name_literals, 0..) |lit, i| {
                 props[i] = brk2: {
                     var static_prop = JSC.C.JSStaticValue{
-                        .name = lit.ptr[0..lit.len :0],
+                        // TODO: update when @typeInfo struct field names are sentinel terminated
+                        // https://github.com/ziglang/zig/issues/16072
+                        .name = lit ++ .{0},
                         .getProperty = null,
                         .setProperty = null,
-                        .attributes = @intToEnum(js.JSPropertyAttributes, 0),
+                        .attributes = @as(js.JSPropertyAttributes, @enumFromInt(0)),
                     };
                     static_prop.getProperty = StaticProperty(i).getter;
 
@@ -1280,7 +1349,7 @@ pub fn NewClassWithInstanceType(
                 .convertToType = null,
             };
             var __static_functions: [function_name_literals.len + 1]js.JSStaticFunction = undefined;
-            for (__static_functions) |_, i| {
+            for (__static_functions, 0..) |_, i| {
                 __static_functions[i] = js.JSStaticFunction{
                     .name = "",
                     .callAsFunction = null,
@@ -1331,14 +1400,14 @@ pub fn NewClassWithInstanceType(
                             const ctxfn = CtxField.rfn;
                             const Func: std.builtin.Type.Fn = @typeInfo(@TypeOf(if (@typeInfo(@TypeOf(ctxfn)) == .Pointer) ctxfn.* else ctxfn)).Fn;
 
-                            var attributes: c_uint = @enumToInt(js.JSPropertyAttributes.kJSPropertyAttributeNone);
+                            var attributes: c_uint = @intFromEnum(js.JSPropertyAttributes.kJSPropertyAttributeNone);
 
                             if (comptime is_read_only or hasReadOnly(@TypeOf(CtxField))) {
-                                attributes |= @enumToInt(js.JSPropertyAttributes.kJSPropertyAttributeReadOnly);
+                                attributes |= @intFromEnum(js.JSPropertyAttributes.kJSPropertyAttributeReadOnly);
                             }
 
                             if (comptime hasEnumerable(@TypeOf(CtxField)) and !CtxField.enumerable) {
-                                attributes |= @enumToInt(js.JSPropertyAttributes.kJSPropertyAttributeDontEnum);
+                                attributes |= @intFromEnum(js.JSPropertyAttributes.kJSPropertyAttributeDontEnum);
                             }
 
                             const PointerType = comptime brk: {
@@ -1349,12 +1418,12 @@ pub fn NewClassWithInstanceType(
                             };
 
                             __static_functions[count] = js.JSStaticFunction{
-                                .name = std.meta.assumeSentinel(function_name_literal ++ [_]u8{0}, 0),
+                                .name = bun.sliceTo(function_name_literal ++ [_]u8{0}, 0).ptr,
                                 .callAsFunction = if (Func.calling_convention == .C) &CtxField.rfn else &To.JS.Callback(
                                     PointerType,
                                     if (@typeInfo(@TypeOf(ctxfn)) == .Pointer) ctxfn.* else ctxfn,
                                 ).rfn,
-                                .attributes = @intToEnum(js.JSPropertyAttributes, attributes),
+                                .attributes = @as(js.JSPropertyAttributes, @enumFromInt(attributes)),
                             };
 
                             count += 1;
@@ -1373,16 +1442,16 @@ pub fn NewClassWithInstanceType(
                             def.hasInstance = &staticFunctions.hasInstance;
                         } else {
                             const attributes: js.JSPropertyAttributes = brk: {
-                                var base = @enumToInt(js.JSPropertyAttributes.kJSPropertyAttributeNone);
+                                var base = @intFromEnum(js.JSPropertyAttributes.kJSPropertyAttributeNone);
 
                                 if (is_read_only)
-                                    base |= @enumToInt(js.JSPropertyAttributes.kJSPropertyAttributeReadOnly);
+                                    base |= @intFromEnum(js.JSPropertyAttributes.kJSPropertyAttributeReadOnly);
 
-                                break :brk @intToEnum(js.JSPropertyAttributes, base);
+                                break :brk @as(js.JSPropertyAttributes, @enumFromInt(base));
                             };
 
                             __static_functions[count] = js.JSStaticFunction{
-                                .name = std.meta.assumeSentinel(function_name_literal ++ [_]u8{0}, 0),
+                                .name = (function_name_literal ++ [_]u8{0})[0..function_name_literal.len :0],
                                 .callAsFunction = &To.JS.Callback(
                                     ZigType,
                                     @field(staticFunctions, function_name_literal),
@@ -1539,9 +1608,9 @@ pub fn NewClassWithInstanceType(
 //                 } else if (@hasField(definition, "get") and @hasField(definition, "set")) {
 //                     data[i] = NewStaticProperty(className, property_names[i], definition.get, definition.set);
 //                 } else if (@hasField(definition, "get")) {
-//                     data[i] = NewStaticProperty(className, property_names[i], definition.get, void{});
+//                     data[i] = NewStaticProperty(className, property_names[i], definition.get, {});
 //                 } else if (@hasField(definition, "set")) {
-//                     data[i] = NewStaticProperty(className, property_names[i], void{}, definition.set);
+//                     data[i] = NewStaticProperty(className, property_names[i], {}, definition.set);
 //                 } else {
 //                     @compileError(className ++ "." ++ property_names[i] ++ " missing lazy, get, or set");
 //                 }
@@ -1634,7 +1703,7 @@ pub fn toTypeError(
     args: anytype,
     ctx: js.JSContextRef,
 ) JSC.JSValue {
-    return toTypeErrorWithCode(std.mem.span(@tagName(code)), fmt, args, ctx);
+    return toTypeErrorWithCode(@tagName(code), fmt, args, ctx);
 }
 
 pub fn throwInvalidArguments(
@@ -1660,14 +1729,21 @@ pub fn getAllocator(_: js.JSContextRef) std.mem.Allocator {
     return default_allocator;
 }
 
+/// Print a JSValue to stdout; this is only meant for debugging purposes
+pub fn dump(value: JSValue, globalObject: *JSC.JSGlobalObject) !void {
+    var formatter = JSC.ZigConsoleClient.Formatter{ .globalThis = globalObject };
+    try Output.errorWriter().print("{}\n", .{value.toFmt(globalObject, &formatter)});
+    Output.flush();
+}
+
 pub const JSStringList = std.ArrayList(js.JSStringRef);
 
 pub const ArrayBuffer = extern struct {
     ptr: [*]u8 = undefined,
-    offset: u32,
-    len: u32,
-    byte_len: u32,
-    typed_array_type: JSC.JSValue.JSType,
+    offset: u32 = 0,
+    len: u32 = 0,
+    byte_len: u32 = 0,
+    typed_array_type: JSC.JSValue.JSType = .Cell,
     value: JSC.JSValue = JSC.JSValue.zero,
     shared: bool = false,
 
@@ -1698,16 +1774,32 @@ pub const ArrayBuffer = extern struct {
         return Stream{ .pos = 0, .buf = this.slice() };
     }
 
-    pub fn create(globalThis: *JSC.JSGlobalObject, bytes: []const u8, comptime kind: JSC.JSValue.JSType) JSValue {
+    pub fn create(globalThis: *JSC.JSGlobalObject, bytes: []const u8, comptime kind: BinaryType) JSValue {
         JSC.markBinding(@src());
         return switch (comptime kind) {
-            .Uint8Array => Bun__createUint8ArrayForCopy(globalThis, bytes.ptr, bytes.len),
+            .Uint8Array => Bun__createUint8ArrayForCopy(globalThis, bytes.ptr, bytes.len, false),
+            .Buffer => Bun__createUint8ArrayForCopy(globalThis, bytes.ptr, bytes.len, true),
             .ArrayBuffer => Bun__createArrayBufferForCopy(globalThis, bytes.ptr, bytes.len),
             else => @compileError("Not implemented yet"),
         };
     }
 
-    extern "C" fn Bun__createUint8ArrayForCopy(*JSC.JSGlobalObject, ptr: ?*const anyopaque, len: usize) JSValue;
+    pub fn createEmpty(globalThis: *JSC.JSGlobalObject, comptime kind: JSC.JSValue.JSType) JSValue {
+        JSC.markBinding(@src());
+
+        return switch (comptime kind) {
+            .Uint8Array => Bun__createUint8ArrayForCopy(globalThis, null, 0, false),
+            .ArrayBuffer => Bun__createArrayBufferForCopy(globalThis, null, 0),
+            else => @compileError("Not implemented yet"),
+        };
+    }
+
+    pub fn createBuffer(globalThis: *JSC.JSGlobalObject, bytes: []const u8) JSValue {
+        JSC.markBinding(@src());
+        return Bun__createUint8ArrayForCopy(globalThis, bytes.ptr, bytes.len, true);
+    }
+
+    extern "C" fn Bun__createUint8ArrayForCopy(*JSC.JSGlobalObject, ptr: ?*const anyopaque, len: usize, buffer: bool) JSValue;
     extern "C" fn Bun__createArrayBufferForCopy(*JSC.JSGlobalObject, ptr: ?*const anyopaque, len: usize) JSValue;
 
     pub fn fromTypedArray(ctx: JSC.C.JSContextRef, value: JSC.JSValue, _: JSC.C.ExceptionRef) ArrayBuffer {
@@ -1718,7 +1810,7 @@ pub const ArrayBuffer = extern struct {
     }
 
     pub fn fromBytes(bytes: []u8, typed_array_type: JSC.JSValue.JSType) ArrayBuffer {
-        return ArrayBuffer{ .offset = 0, .len = @intCast(u32, bytes.len), .byte_len = @intCast(u32, bytes.len), .typed_array_type = typed_array_type, .ptr = bytes.ptr };
+        return ArrayBuffer{ .offset = 0, .len = @as(u32, @intCast(bytes.len)), .byte_len = @as(u32, @intCast(bytes.len)), .typed_array_type = typed_array_type, .ptr = bytes.ptr };
     }
 
     pub fn toJSUnchecked(this: ArrayBuffer, ctx: JSC.C.JSContextRef, exception: JSC.C.ExceptionRef) JSC.JSValue {
@@ -1746,7 +1838,7 @@ pub const ArrayBuffer = extern struct {
                 this.ptr,
                 this.byte_len,
                 MarkedArrayBuffer_deallocator,
-                @intToPtr(*anyopaque, @ptrToInt(&bun.default_allocator)),
+                @as(*anyopaque, @ptrFromInt(@intFromPtr(&bun.default_allocator))),
                 exception,
             ));
         }
@@ -1757,10 +1849,12 @@ pub const ArrayBuffer = extern struct {
             this.ptr,
             this.byte_len,
             MarkedArrayBuffer_deallocator,
-            @intToPtr(*anyopaque, @ptrToInt(&bun.default_allocator)),
+            @as(*anyopaque, @ptrFromInt(@intFromPtr(&bun.default_allocator))),
             exception,
         ));
     }
+
+    const log = Output.scoped(.ArrayBuffer, false);
 
     pub fn toJS(this: ArrayBuffer, ctx: JSC.C.JSContextRef, exception: JSC.C.ExceptionRef) JSC.JSValue {
         if (!this.value.isEmpty()) {
@@ -1769,6 +1863,8 @@ pub const ArrayBuffer = extern struct {
 
         // If it's not a mimalloc heap buffer, we're not going to call a deallocator
         if (this.len > 0 and !bun.Mimalloc.mi_is_in_heap_region(this.ptr)) {
+            log("toJS but will never free: {d} bytes", .{this.len});
+
             if (this.typed_array_type == .ArrayBuffer) {
                 return JSC.JSValue.fromRef(JSC.C.JSObjectMakeArrayBufferWithBytesNoCopy(
                     ctx,
@@ -1846,15 +1942,15 @@ pub const ArrayBuffer = extern struct {
     pub const slice = byteSlice;
 
     pub inline fn asU16(this: *const @This()) []u16 {
-        return std.mem.bytesAsSlice(u16, @alignCast(@alignOf([*]u16), this.ptr[this.offset..this.byte_len]));
+        return std.mem.bytesAsSlice(u16, @as([*]u16, @alignCast(this.ptr))[this.offset..this.byte_len]);
     }
 
     pub inline fn asU16Unaligned(this: *const @This()) []align(1) u16 {
-        return std.mem.bytesAsSlice(u16, @alignCast(@alignOf([*]align(1) u16), this.ptr[this.offset..this.byte_len]));
+        return std.mem.bytesAsSlice(u16, @as([*]align(1) u16, @alignCast(this.ptr))[this.offset..this.byte_len]);
     }
 
     pub inline fn asU32(this: *const @This()) []u32 {
-        return std.mem.bytesAsSlice(u32, @alignCast(@alignOf([*]u32), this.ptr)[this.offset..this.byte_len]);
+        return std.mem.bytesAsSlice(u32, @as([*]u32, @alignCast(this.ptr))[this.offset..this.byte_len]);
     }
 };
 
@@ -1963,8 +2059,8 @@ pub const RefString = struct {
     ptr: [*]const u8 = undefined,
     len: usize = 0,
     hash: Hash = 0,
+    impl: bun.WTF.StringImpl,
 
-    count: u32 = 0,
     allocator: std.mem.Allocator,
 
     ctx: ?*anyopaque = null,
@@ -1974,17 +2070,13 @@ pub const RefString = struct {
     pub const Map = std.HashMap(Hash, *JSC.RefString, IdentityContext(Hash), 80);
 
     pub fn toJS(this: *RefString, global: *JSC.JSGlobalObject) JSValue {
-        return JSC.ZigString.init(this.slice()).external(global, this, RefString__external);
+        return bun.String.init(this.impl).toJS(global);
     }
 
     pub const Callback = fn (ctx: *anyopaque, str: *RefString) void;
 
     pub fn computeHash(input: []const u8) u32 {
-        return @truncate(u32, std.hash.Wyhash.hash(0, input));
-    }
-
-    pub fn ref(this: *RefString) void {
-        this.count += 1;
+        return std.hash.XxHash32.hash(0, input);
     }
 
     pub fn slice(this: *RefString) []const u8 {
@@ -1993,25 +2085,21 @@ pub const RefString = struct {
         return this.leak();
     }
 
+    pub fn ref(this: *RefString) void {
+        this.impl.ref();
+    }
+
     pub fn leak(this: RefString) []const u8 {
         @setRuntimeSafety(false);
         return this.ptr[0..this.len];
     }
 
     pub fn deref(this: *RefString) void {
-        this.count -|= 1;
-
-        if (this.count == 0) {
-            this.deinit();
-        }
+        this.impl.deref();
     }
 
-    pub export fn RefString__free(this: *RefString, _: [*]const u8, _: usize) void {
-        this.deref();
-    }
-
-    pub export fn RefString__external(this: ?*anyopaque, _: ?*anyopaque, _: usize) void {
-        bun.cast(*RefString, this.?).deref();
+    pub export fn RefString__free(this: *anyopaque, _: *anyopaque, _: u32) void {
+        bun.cast(*RefString, this).deinit();
     }
 
     pub fn deinit(this: *RefString) void {
@@ -2049,7 +2137,7 @@ pub const ExternalBuffer = struct {
     }
 
     pub fn toJS(this: *ExternalBuffer, ctx: *JSC.JSGlobalObject) JSC.JSValue {
-        return JSC.JSValue.createBufferWithCtx(ctx, this.buf, this.ctx, ExternalBuffer_deallocator);
+        return JSC.JSValue.createBufferWithCtx(ctx, this.buf, this, ExternalBuffer_deallocator);
     }
 
     pub fn toArrayBuffer(this: *ExternalBuffer, ctx: *JSC.JSGlobalObject) JSC.JSValue {
@@ -2058,7 +2146,10 @@ pub const ExternalBuffer = struct {
 };
 pub export fn ExternalBuffer_deallocator(bytes_: *anyopaque, ctx: *anyopaque) callconv(.C) void {
     var external: *ExternalBuffer = bun.cast(*ExternalBuffer, ctx);
-    external.function.?(external.global, external.ctx, bytes_);
+    if (external.function) |function| {
+        function(external.global, external.ctx, bytes_);
+    }
+
     const allocator = external.allocator;
     allocator.destroy(external);
 }
@@ -2090,10 +2181,6 @@ const Expect = Test.Expect;
 const DescribeScope = Test.DescribeScope;
 const TestScope = Test.TestScope;
 const NodeFS = JSC.Node.NodeFS;
-const DirEnt = JSC.Node.DirEnt;
-const Stats = JSC.Node.Stats;
-const BigIntStats = JSC.Node.BigIntStats;
-const Transpiler = @import("./api/transpiler.zig");
 const TextEncoder = WebCore.TextEncoder;
 const TextDecoder = WebCore.TextDecoder;
 const HTMLRewriter = JSC.Cloudflare.HTMLRewriter;
@@ -2121,12 +2208,9 @@ const MD5_SHA1 = JSC.API.Bun.Crypto.MD5_SHA1;
 const FFI = JSC.FFI;
 pub const JSPrivateDataPtr = TaggedPointerUnion(.{
     AttributeIterator,
-    BigIntStats,
-    BuildError,
     Comment,
     DebugServer,
     DebugSSLServer,
-    DescribeScope,
     DocEnd,
     DocType,
     Element,
@@ -2137,14 +2221,11 @@ pub const JSPrivateDataPtr = TaggedPointerUnion(.{
     LazyPropertiesObject,
 
     ModuleNamespace,
-    ResolveError,
     Router,
     Server,
 
     SSLServer,
-    Stats,
     TextChunk,
-    Transpiler,
     FFI,
 });
 
@@ -2185,7 +2266,7 @@ pub fn getterWrap(comptime Container: type, comptime name: string) GetterType(Co
                 })
             else
                 @call(.auto, @field(Container, name), .{ this, ctx.ptr() });
-            if (!result.isUndefinedOrNull() and result.isError()) {
+            if (result.isError()) {
                 exception.* = result.asObjectRef();
                 return null;
             }
@@ -2660,8 +2741,10 @@ pub fn wrapWithHasContainer(
             exception: js.ExceptionRef,
         ) js.JSObjectRef {
             var iter = JSC.Node.ArgumentsSlice.from(ctx.bunVM(), arguments);
+            defer iter.deinit();
             var args: Args = undefined;
 
+            comptime var passed_exception_ref = false;
             comptime var i: usize = 0;
             inline while (i < FunctionTypeInfo.params.len) : (i += 1) {
                 const ArgType = comptime FunctionTypeInfo.params[i].type.?;
@@ -2676,12 +2759,10 @@ pub fn wrapWithHasContainer(
                     JSC.Node.StringOrBuffer => {
                         const arg = iter.nextEat() orelse {
                             exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                            iter.deinit();
                             return null;
                         };
                         args[i] = JSC.Node.StringOrBuffer.fromJS(ctx.ptr(), iter.arena.allocator(), arg, exception) orelse {
                             exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                            iter.deinit();
                             return null;
                         };
                     },
@@ -2690,7 +2771,6 @@ pub fn wrapWithHasContainer(
                             if (!arg.isEmptyOrUndefinedOrNull()) {
                                 args[i] = JSC.Node.StringOrBuffer.fromJS(ctx.ptr(), iter.arena.allocator(), arg, exception) orelse {
                                     exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                                    iter.deinit();
                                     return null;
                                 };
                             } else {
@@ -2705,7 +2785,6 @@ pub fn wrapWithHasContainer(
                             if (!arg.isEmptyOrUndefinedOrNull()) {
                                 args[i] = JSC.Node.SliceOrBuffer.fromJS(ctx.ptr(), iter.arena.allocator(), arg, exception) orelse {
                                     exception.* = JSC.toInvalidArguments("expected string or buffer", .{}, ctx).asObjectRef();
-                                    iter.deinit();
                                     return null;
                                 };
                             } else {
@@ -2719,12 +2798,10 @@ pub fn wrapWithHasContainer(
                         if (iter.nextEat()) |arg| {
                             args[i] = arg.asArrayBuffer(ctx.ptr()) orelse {
                                 exception.* = JSC.toInvalidArguments("expected TypedArray", .{}, ctx).asObjectRef();
-                                iter.deinit();
                                 return null;
                             };
                         } else {
                             exception.* = JSC.toInvalidArguments("expected TypedArray", .{}, ctx).asObjectRef();
-                            iter.deinit();
                             return null;
                         }
                     },
@@ -2733,7 +2810,6 @@ pub fn wrapWithHasContainer(
                             if (!arg.isEmptyOrUndefinedOrNull()) {
                                 args[i] = arg.asArrayBuffer(ctx.ptr()) orelse {
                                     exception.* = JSC.toInvalidArguments("expected TypedArray", .{}, ctx).asObjectRef();
-                                    iter.deinit();
                                     return null;
                                 };
                             } else {
@@ -2746,13 +2822,11 @@ pub fn wrapWithHasContainer(
                     ZigString => {
                         var string_value = eater(&iter) orelse {
                             JSC.throwInvalidArguments("Missing argument", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         };
 
                         if (string_value.isUndefinedOrNull()) {
                             JSC.throwInvalidArguments("Expected string", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         }
 
@@ -2781,11 +2855,9 @@ pub fn wrapWithHasContainer(
                     *Request => {
                         args[i] = (eater(&iter) orelse {
                             JSC.throwInvalidArguments("Missing Request object", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         }).as(Request) orelse {
                             JSC.throwInvalidArguments("Expected Request object", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         };
                     },
@@ -2793,17 +2865,16 @@ pub fn wrapWithHasContainer(
                         args[i] = thisObject;
                         if (!JSValue.fromRef(thisObject).isCell() or !JSValue.fromRef(thisObject).isObject()) {
                             JSC.throwInvalidArguments("Expected object", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         }
                     },
                     js.ExceptionRef => {
                         args[i] = exception;
+                        passed_exception_ref = true;
                     },
                     JSValue => {
                         const val = eater(&iter) orelse {
                             JSC.throwInvalidArguments("Missing argument", .{}, ctx, exception);
-                            iter.deinit();
                             return null;
                         };
                         args[i] = val;
@@ -2816,10 +2887,15 @@ pub fn wrapWithHasContainer(
             }
 
             var result: JSValue = @call(.auto, @field(Container, name), args);
-            if (!result.isEmptyOrUndefinedOrNull() and result.isError()) {
-                exception.* = result.asObjectRef();
-                iter.deinit();
-                return null;
+            if (comptime passed_exception_ref) {
+                if (exception.* != null) {
+                    return null;
+                }
+            } else {
+                if (result.isError()) {
+                    exception.* = result.asObjectRef();
+                    return null;
+                }
             }
 
             if (comptime maybe_async) {
@@ -2829,8 +2905,6 @@ pub fn wrapWithHasContainer(
                     result = promise.result(ctx.vm());
                 }
             }
-
-            iter.deinit();
 
             if (result == .zero) {
                 return null;
@@ -3060,6 +3134,29 @@ pub fn wrapStaticMethod(
                             args[i] = null;
                         }
                     },
+                    JSC.Node.SliceOrBuffer => {
+                        const arg = iter.nextEat() orelse {
+                            globalThis.throwInvalidArguments("expected string or buffer", .{});
+                            iter.deinit();
+                            return JSC.JSValue.zero;
+                        };
+                        args[i] = JSC.Node.SliceOrBuffer.fromJS(globalThis.ptr(), iter.arena.allocator(), arg) orelse {
+                            globalThis.throwInvalidArguments("expected string or buffer", .{});
+                            iter.deinit();
+                            return JSC.JSValue.zero;
+                        };
+                    },
+                    ?JSC.Node.SliceOrBuffer => {
+                        if (iter.nextEat()) |arg| {
+                            args[i] = JSC.Node.SliceOrBuffer.fromJS(globalThis.ptr(), iter.arena.allocator(), arg) orelse {
+                                globalThis.throwInvalidArguments("expected string or buffer", .{});
+                                iter.deinit();
+                                return JSC.JSValue.zero;
+                            };
+                        } else {
+                            args[i] = null;
+                        }
+                    },
                     JSC.ArrayBuffer => {
                         if (iter.nextEat()) |arg| {
                             args[i] = arg.asArrayBuffer(globalThis.ptr()) orelse {
@@ -3201,7 +3298,7 @@ pub const PollRef = struct {
 
         this.status = .inactive;
         loop.num_polls -= 1;
-        loop.active -= 1;
+        loop.active -|= 1;
     }
 
     /// Only intended to be used from EventLoop.Pollable
@@ -3223,19 +3320,22 @@ pub const PollRef = struct {
         if (this.status != .active)
             return;
         this.status = .inactive;
-        log("unref", .{});
-        vm.uws_event_loop.?.num_polls -= 1;
-        vm.uws_event_loop.?.active -= 1;
+        vm.uws_event_loop.?.unref();
+    }
+    /// Prevent a poll from keeping the process alive on the next tick.
+    pub fn unrefOnNextTick(this: *PollRef, vm: *JSC.VirtualMachine) void {
+        if (this.status != .active)
+            return;
+        this.status = .inactive;
+        vm.pending_unref_counter +|= 1;
     }
 
     /// Allow a poll to keep the process alive.
     pub fn ref(this: *PollRef, vm: *JSC.VirtualMachine) void {
         if (this.status != .inactive)
             return;
-        log("ref", .{});
         this.status = .active;
-        vm.uws_event_loop.?.num_polls += 1;
-        vm.uws_event_loop.?.active += 1;
+        vm.uws_event_loop.?.ref();
     }
 };
 
@@ -3260,8 +3360,10 @@ pub const FilePoll = struct {
     const Subprocess = JSC.Subprocess;
     const BufferedInput = Subprocess.BufferedInput;
     const BufferedOutput = Subprocess.BufferedOutput;
+    const DNSResolver = JSC.DNS.DNSResolver;
+    const GetAddrInfoRequest = JSC.DNS.GetAddrInfoRequest;
     const Deactivated = opaque {
-        pub var owner: Owner = Owner.init(@intToPtr(*Deactivated, @as(usize, 0xDEADBEEF)));
+        pub var owner: Owner = Owner.init(@as(*Deactivated, @ptrFromInt(@as(usize, 0xDEADBEEF))));
     };
 
     pub const Owner = bun.TaggedPointerUnion(.{
@@ -3271,6 +3373,8 @@ pub const FilePoll = struct {
         BufferedInput,
         FIFO,
         Deactivated,
+        DNSResolver,
+        GetAddrInfoRequest,
     });
 
     fn updateFlags(poll: *FilePoll, updated: Flags.Set) void {
@@ -3278,6 +3382,7 @@ pub const FilePoll = struct {
         flags.remove(.readable);
         flags.remove(.writable);
         flags.remove(.process);
+        flags.remove(.machport);
         flags.remove(.eof);
         flags.remove(.hup);
 
@@ -3331,19 +3436,24 @@ pub const FilePoll = struct {
         this.deinitWithVM(vm);
     }
 
-    pub fn deinitWithVM(this: *FilePoll, vm: *JSC.VirtualMachine) void {
+    pub fn deinitWithoutVM(this: *FilePoll, loop: *uws.Loop, polls: *JSC.FilePoll.HiveArray) void {
         if (this.isRegistered()) {
-            _ = this.unregister(vm.uws_event_loop.?);
+            _ = this.unregister(loop);
         }
 
         this.owner = Deactivated.owner;
         this.flags = Flags.Set{};
         this.fd = invalid_fd;
-        vm.rareData().filePolls(vm).put(this);
+        polls.put(this);
+    }
+
+    pub fn deinitWithVM(this: *FilePoll, vm: *JSC.VirtualMachine) void {
+        var loop = vm.uws_event_loop.?;
+        this.deinitWithoutVM(loop, vm.rareData().filePolls(vm));
     }
 
     pub fn isRegistered(this: *const FilePoll) bool {
-        return this.flags.contains(.poll_writable) or this.flags.contains(.poll_readable) or this.flags.contains(.poll_process);
+        return this.flags.contains(.poll_writable) or this.flags.contains(.poll_readable) or this.flags.contains(.poll_process) or this.flags.contains(.poll_machport);
     }
 
     const kqueue_or_epoll = if (Environment.isMac) "kevent" else "epoll";
@@ -3371,6 +3481,18 @@ pub const FilePoll = struct {
                 loader.onPoll(size_or_offset, 0);
             },
 
+            @field(Owner.Tag, "DNSResolver") => {
+                log("onUpdate " ++ kqueue_or_epoll ++ " (fd: {d}) DNSResolver", .{poll.fd});
+                var loader: *DNSResolver = ptr.as(DNSResolver);
+                loader.onDNSPoll(poll);
+            },
+
+            @field(Owner.Tag, "GetAddrInfoRequest") => {
+                log("onUpdate " ++ kqueue_or_epoll ++ " (fd: {d}) GetAddrInfoRequest", .{poll.fd});
+                var loader: *GetAddrInfoRequest = ptr.as(GetAddrInfoRequest);
+                loader.onMachportChange();
+            },
+
             else => {
                 log("onUpdate " ++ kqueue_or_epoll ++ " (fd: {d}) disconnected?", .{poll.fd});
             },
@@ -3389,12 +3511,16 @@ pub const FilePoll = struct {
         /// Poll for process-related events
         poll_process,
 
+        /// Poll for machport events
+        poll_machport,
+
         // What did the event loop tell us?
         readable,
         writable,
         process,
         eof,
         hup,
+        machport,
 
         // What is the type of file descriptor?
         fifo,
@@ -3414,6 +3540,7 @@ pub const FilePoll = struct {
                 .readable => .poll_readable,
                 .writable => .poll_writable,
                 .process => .poll_process,
+                .machport => .poll_machport,
                 else => this,
             };
         }
@@ -3440,6 +3567,9 @@ pub const FilePoll = struct {
             } else if (kqueue_event.filter == std.os.system.EVFILT_PROC) {
                 log("proc", .{});
                 flags.insert(Flags.process);
+            } else if (kqueue_event.filter == std.os.system.EVFILT_MACHPORT) {
+                log("machport", .{});
+                flags.insert(Flags.machport);
             }
             return flags;
         }
@@ -3488,7 +3618,7 @@ pub const FilePoll = struct {
             return;
         this.flags.insert(.disable);
 
-        vm.uws_event_loop.?.active -= @as(u32, @boolToInt(this.flags.contains(.has_incremented_poll_count)));
+        vm.uws_event_loop.?.active -= @as(u32, @intFromBool(this.flags.contains(.has_incremented_poll_count)));
     }
 
     pub fn enableKeepingProcessAlive(this: *FilePoll, vm: *JSC.VirtualMachine) void {
@@ -3496,7 +3626,7 @@ pub const FilePoll = struct {
             return;
         this.flags.remove(.disable);
 
-        vm.uws_event_loop.?.active += @as(u32, @boolToInt(this.flags.contains(.has_incremented_poll_count)));
+        vm.uws_event_loop.?.active += @as(u32, @intFromBool(this.flags.contains(.has_incremented_poll_count)));
     }
 
     pub fn canActivate(this: *const FilePoll) bool {
@@ -3506,16 +3636,16 @@ pub const FilePoll = struct {
     /// Only intended to be used from EventLoop.Pollable
     pub fn deactivate(this: *FilePoll, loop: *uws.Loop) void {
         std.debug.assert(this.flags.contains(.has_incremented_poll_count));
-        loop.num_polls -= @as(i32, @boolToInt(this.flags.contains(.has_incremented_poll_count)));
-        loop.active -= @as(u32, @boolToInt(!this.flags.contains(.disable) and this.flags.contains(.has_incremented_poll_count)));
+        loop.num_polls -= @as(i32, @intFromBool(this.flags.contains(.has_incremented_poll_count)));
+        loop.active -|= @as(u32, @intFromBool(!this.flags.contains(.disable) and this.flags.contains(.has_incremented_poll_count)));
 
         this.flags.remove(.has_incremented_poll_count);
     }
 
     /// Only intended to be used from EventLoop.Pollable
     pub fn activate(this: *FilePoll, loop: *uws.Loop) void {
-        loop.num_polls += @as(i32, @boolToInt(!this.flags.contains(.has_incremented_poll_count)));
-        loop.active += @as(u32, @boolToInt(!this.flags.contains(.disable) and !this.flags.contains(.has_incremented_poll_count)));
+        loop.num_polls += @as(i32, @intFromBool(!this.flags.contains(.has_incremented_poll_count)));
+        loop.active += @as(u32, @intFromBool(!this.flags.contains(.disable) and !this.flags.contains(.has_incremented_poll_count)));
 
         this.flags.insert(.has_incremented_poll_count);
     }
@@ -3526,7 +3656,7 @@ pub const FilePoll = struct {
 
     pub fn initWithOwner(vm: *JSC.VirtualMachine, fd: bun.FileDescriptor, flags: Flags.Struct, owner: Owner) *FilePoll {
         var poll = vm.rareData().filePolls(vm).get();
-        poll.fd = @intCast(u32, fd);
+        poll.fd = @as(u32, @intCast(fd));
         poll.flags = Flags.Set.init(flags);
         poll.owner = owner;
         if (KQueueGenerationNumber != u0) {
@@ -3571,9 +3701,9 @@ pub const FilePoll = struct {
 
         var file_poll = tag.as(FilePoll);
         if (comptime Environment.isMac)
-            onKQueueEvent(file_poll, loop, &loop.ready_polls[@intCast(usize, loop.current_ready_poll)])
+            onKQueueEvent(file_poll, loop, &loop.ready_polls[@as(usize, @intCast(loop.current_ready_poll))])
         else if (comptime Environment.isLinux)
-            onEpollEvent(file_poll, loop, &loop.ready_polls[@intCast(usize, loop.current_ready_poll)]);
+            onEpollEvent(file_poll, loop, &loop.ready_polls[@as(usize, @intCast(loop.current_ready_poll))]);
     }
 
     const Pollable = bun.TaggedPointerUnion(
@@ -3590,17 +3720,20 @@ pub const FilePoll = struct {
     const timeout = std.mem.zeroes(std.os.timespec);
     const kevent = std.c.kevent;
     const linux = std.os.linux;
+
     pub fn register(this: *FilePoll, loop: *uws.Loop, flag: Flags, one_shot: bool) JSC.Maybe(void) {
+        return registerWithFd(this, loop, flag, one_shot, this.fd);
+    }
+    pub fn registerWithFd(this: *FilePoll, loop: *uws.Loop, flag: Flags, one_shot: bool, fd: u64) JSC.Maybe(void) {
         const watcher_fd = loop.fd;
-        const fd = this.fd;
 
         log("register: {s} ({d})", .{ @tagName(flag), fd });
+
+        std.debug.assert(fd != invalid_fd);
 
         if (one_shot) {
             this.flags.insert(.one_shot);
         }
-
-        std.debug.assert(this.fd != invalid_fd);
 
         if (comptime Environment.isLinux) {
             const one_shot_flag: u32 = if (!this.flags.contains(.one_shot)) 0 else linux.EPOLL.ONESHOT;
@@ -3613,12 +3746,12 @@ pub const FilePoll = struct {
                 else => unreachable,
             };
 
-            var event = linux.epoll_event{ .events = flags, .data = .{ .u64 = @ptrToInt(Pollable.init(this).ptr()) } };
+            var event = linux.epoll_event{ .events = flags, .data = .{ .u64 = @intFromPtr(Pollable.init(this).ptr()) } };
 
             const ctl = linux.epoll_ctl(
                 watcher_fd,
                 if (this.isRegistered() or this.flags.contains(.needs_rearm)) linux.EPOLL.CTL_MOD else linux.EPOLL.CTL_ADD,
-                @intCast(std.os.fd_t, fd),
+                @as(std.os.fd_t, @intCast(fd)),
                 &event,
             );
 
@@ -3630,29 +3763,38 @@ pub const FilePoll = struct {
             const one_shot_flag: u16 = if (!this.flags.contains(.one_shot)) 0 else std.c.EV_ONESHOT;
             changelist[0] = switch (flag) {
                 .readable => .{
-                    .ident = @intCast(u64, fd),
+                    .ident = @as(u64, @intCast(fd)),
                     .filter = std.os.system.EVFILT_READ,
                     .data = 0,
                     .fflags = 0,
-                    .udata = @ptrToInt(Pollable.init(this).ptr()),
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
                     .flags = std.c.EV_ADD | one_shot_flag,
                     .ext = .{ this.generation_number, 0 },
                 },
                 .writable => .{
-                    .ident = @intCast(u64, fd),
+                    .ident = @as(u64, @intCast(fd)),
                     .filter = std.os.system.EVFILT_WRITE,
                     .data = 0,
                     .fflags = 0,
-                    .udata = @ptrToInt(Pollable.init(this).ptr()),
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
                     .flags = std.c.EV_ADD | one_shot_flag,
                     .ext = .{ this.generation_number, 0 },
                 },
                 .process => .{
-                    .ident = @intCast(u64, fd),
+                    .ident = @as(u64, @intCast(fd)),
                     .filter = std.os.system.EVFILT_PROC,
                     .data = 0,
                     .fflags = std.c.NOTE_EXIT,
-                    .udata = @ptrToInt(Pollable.init(this).ptr()),
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
+                    .flags = std.c.EV_ADD | one_shot_flag,
+                    .ext = .{ this.generation_number, 0 },
+                },
+                .machport => .{
+                    .ident = @as(u64, @intCast(fd)),
+                    .filter = std.os.system.EVFILT_MACHPORT,
+                    .data = 0,
+                    .fflags = 0,
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
                     .flags = std.c.EV_ADD | one_shot_flag,
                     .ext = .{ this.generation_number, 0 },
                 },
@@ -3711,6 +3853,7 @@ pub const FilePoll = struct {
             .readable => .poll_readable,
             .process => if (comptime Environment.isLinux) .poll_readable else .poll_process,
             .writable => .poll_writable,
+            .machport => .poll_machport,
             else => unreachable,
         });
         this.flags.remove(.needs_rearm);
@@ -3721,12 +3864,15 @@ pub const FilePoll = struct {
     const invalid_fd = bun.invalid_fd;
 
     pub fn unregister(this: *FilePoll, loop: *uws.Loop) JSC.Maybe(void) {
-        if (!(this.flags.contains(.poll_readable) or this.flags.contains(.poll_writable) or this.flags.contains(.poll_process))) {
+        return this.unregisterWithFd(loop, this.fd);
+    }
+
+    pub fn unregisterWithFd(this: *FilePoll, loop: *uws.Loop, fd: u64) JSC.Maybe(void) {
+        if (!(this.flags.contains(.poll_readable) or this.flags.contains(.poll_writable) or this.flags.contains(.poll_process) or this.flags.contains(.poll_machport))) {
             // no-op
             return JSC.Maybe(void).success;
         }
 
-        const fd = this.fd;
         std.debug.assert(fd != invalid_fd);
         const watcher_fd = loop.fd;
         const flag: Flags = brk: {
@@ -3736,6 +3882,9 @@ pub const FilePoll = struct {
                 break :brk .writable;
             if (this.flags.contains(.poll_process))
                 break :brk .process;
+
+            if (this.flags.contains(.poll_machport))
+                break :brk .machport;
             return JSC.Maybe(void).success;
         };
 
@@ -3744,6 +3893,7 @@ pub const FilePoll = struct {
             this.flags.remove(.poll_process);
             this.flags.remove(.poll_readable);
             this.flags.remove(.poll_process);
+            this.flags.remove(.poll_machport);
             return JSC.Maybe(void).success;
         }
 
@@ -3753,7 +3903,7 @@ pub const FilePoll = struct {
             const ctl = linux.epoll_ctl(
                 watcher_fd,
                 linux.EPOLL.CTL_DEL,
-                @intCast(std.os.fd_t, fd),
+                @as(std.os.fd_t, @intCast(fd)),
                 null,
             );
 
@@ -3765,29 +3915,38 @@ pub const FilePoll = struct {
 
             changelist[0] = switch (flag) {
                 .readable => .{
-                    .ident = @intCast(u64, fd),
+                    .ident = @as(u64, @intCast(fd)),
                     .filter = std.os.system.EVFILT_READ,
                     .data = 0,
                     .fflags = 0,
-                    .udata = @ptrToInt(Pollable.init(this).ptr()),
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
+                    .flags = std.c.EV_DELETE,
+                    .ext = .{ 0, 0 },
+                },
+                .machport => .{
+                    .ident = @as(u64, @intCast(fd)),
+                    .filter = std.os.system.EVFILT_MACHPORT,
+                    .data = 0,
+                    .fflags = 0,
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
                     .flags = std.c.EV_DELETE,
                     .ext = .{ 0, 0 },
                 },
                 .writable => .{
-                    .ident = @intCast(u64, fd),
+                    .ident = @as(u64, @intCast(fd)),
                     .filter = std.os.system.EVFILT_WRITE,
                     .data = 0,
                     .fflags = 0,
-                    .udata = @ptrToInt(Pollable.init(this).ptr()),
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
                     .flags = std.c.EV_DELETE,
                     .ext = .{ 0, 0 },
                 },
                 .process => .{
-                    .ident = @intCast(u64, fd),
+                    .ident = @as(u64, @intCast(fd)),
                     .filter = std.os.system.EVFILT_PROC,
                     .data = 0,
                     .fflags = std.c.NOTE_EXIT,
-                    .udata = @ptrToInt(Pollable.init(this).ptr()),
+                    .udata = @intFromPtr(Pollable.init(this).ptr()),
                     .flags = std.c.EV_DELETE,
                     .ext = .{ 0, 0 },
                 },
@@ -3822,7 +3981,7 @@ pub const FilePoll = struct {
 
             const errno = std.c.getErrno(rc);
             switch (rc) {
-                std.math.minInt(@TypeOf(rc))...-1 => return JSC.Maybe(void).errnoSys(@enumToInt(errno), .kevent).?,
+                std.math.minInt(@TypeOf(rc))...-1 => return JSC.Maybe(void).errnoSys(@intFromEnum(errno), .kevent).?,
                 else => {},
             }
         } else {
@@ -3836,6 +3995,7 @@ pub const FilePoll = struct {
         this.flags.remove(.poll_readable);
         this.flags.remove(.poll_writable);
         this.flags.remove(.poll_process);
+        this.flags.remove(.poll_machport);
 
         if (this.isActive())
             this.deactivate(loop);
@@ -3914,5 +4074,95 @@ pub const Strong = extern struct {
         var ref: *JSC.napi.Ref = this.ref orelse return;
         this.ref = null;
         ref.destroy();
+    }
+};
+
+pub const BinaryType = enum {
+    Buffer,
+    ArrayBuffer,
+    Uint8Array,
+    Uint16Array,
+    Uint32Array,
+    Int8Array,
+    Int16Array,
+    Int32Array,
+    Float32Array,
+    Float64Array,
+    // DataView,
+
+    pub fn toJSType(this: BinaryType) JSC.JSValue.JSType {
+        return switch (this) {
+            .ArrayBuffer => .ArrayBuffer,
+            .Buffer => .Uint8Array,
+            // .DataView => .DataView,
+            .Float32Array => .Float32Array,
+            .Float64Array => .Float64Array,
+            .Int16Array => .Int16Array,
+            .Int32Array => .Int32Array,
+            .Int8Array => .Int8Array,
+            .Uint16Array => .Uint16Array,
+            .Uint32Array => .Uint32Array,
+            .Uint8Array => .Uint8Array,
+        };
+    }
+
+    pub fn toTypedArrayType(this: BinaryType) JSC.C.JSTypedArrayType {
+        return this.toJSType().toC();
+    }
+
+    pub const Map = bun.ComptimeStringMap(
+        BinaryType,
+        .{
+            .{ "ArrayBuffer", .ArrayBuffer },
+            .{ "Buffer", .Buffer },
+            // .{ "DataView", .DataView },
+            .{ "Float32Array", .Float32Array },
+            .{ "Float64Array", .Float64Array },
+            .{ "Int16Array", .Int16Array },
+            .{ "Int32Array", .Int32Array },
+            .{ "Int8Array", .Int8Array },
+            .{ "Uint16Array", .Uint16Array },
+            .{ "Uint32Array", .Uint32Array },
+            .{ "Uint8Array", .Uint8Array },
+            .{ "arraybuffer", .ArrayBuffer },
+            .{ "buffer", .Buffer },
+            // .{ "dataview", .DataView },
+            .{ "float32array", .Float32Array },
+            .{ "float64array", .Float64Array },
+            .{ "int16array", .Int16Array },
+            .{ "int32array", .Int32Array },
+            .{ "int8array", .Int8Array },
+            .{ "nodebuffer", .Buffer },
+            .{ "uint16array", .Uint16Array },
+            .{ "uint32array", .Uint32Array },
+            .{ "uint8array", .Uint8Array },
+        },
+    );
+
+    pub fn fromString(input: []const u8) ?BinaryType {
+        return Map.get(input);
+    }
+
+    pub fn fromJSValue(globalThis: *JSC.JSGlobalObject, input: JSValue) ?BinaryType {
+        if (input.isString()) {
+            return Map.getWithEql(input.getZigString(globalThis), ZigString.eqlComptime);
+        }
+
+        return null;
+    }
+
+    /// This clones bytes
+    pub fn toJS(this: BinaryType, bytes: []const u8, globalThis: *JSC.JSGlobalObject) JSValue {
+        switch (this) {
+            .Buffer => return JSC.ArrayBuffer.createBuffer(globalThis, bytes),
+            .ArrayBuffer => return JSC.ArrayBuffer.create(globalThis, bytes, .ArrayBuffer),
+            .Uint8Array => return JSC.ArrayBuffer.create(globalThis, bytes, .Uint8Array),
+
+            // These aren't documented, but they are supported
+            .Uint16Array, .Uint32Array, .Int8Array, .Int16Array, .Int32Array, .Float32Array, .Float64Array => {
+                const buffer = JSC.ArrayBuffer.create(globalThis, bytes, .ArrayBuffer);
+                return JSC.JSValue.c(JSC.C.JSObjectMakeTypedArrayWithArrayBuffer(globalThis, this.toTypedArrayType(), buffer.asObjectRef(), null));
+            },
+        }
     }
 };

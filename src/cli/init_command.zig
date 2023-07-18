@@ -1,4 +1,4 @@
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -13,14 +13,14 @@ const open = @import("../open.zig");
 const CLI = @import("../cli.zig");
 const Fs = @import("../fs.zig");
 const ParseJSON = @import("../json_parser.zig").ParseJSONUTF8;
-const js_parser = @import("../js_parser.zig");
-const js_ast = @import("../js_ast.zig");
+const js_parser = bun.js_parser;
+const js_ast = bun.JSAst;
 const linker = @import("../linker.zig");
 const options = @import("../options.zig");
 const initializeStore = @import("./create_command.zig").initializeStore;
-const lex = @import("../js_lexer.zig");
-const logger = @import("bun").logger;
-const JSPrinter = @import("../js_printer.zig");
+const lex = bun.js_lexer;
+const logger = @import("root").bun.logger;
+const JSPrinter = bun.js_printer;
 
 fn exists(path: anytype) bool {
     if (@TypeOf(path) == [:0]const u8 or @TypeOf(path) == [:0]u8) {
@@ -80,7 +80,7 @@ pub const InitCommand = struct {
         }
 
         var new = try allocator.alloc(u8, input.len);
-        for (input) |c, i| {
+        for (input, 0..) |c, i| {
             if (c == ' ' or c == '"' or c == '\'') {
                 new[i] = '-';
             } else {
@@ -99,7 +99,7 @@ pub const InitCommand = struct {
     };
 
     pub fn exec(alloc: std.mem.Allocator, argv: [][*:0]u8) !void {
-        var fs = try Fs.FileSystem.init1(alloc, null);
+        var fs = try Fs.FileSystem.init(null);
         const pathname = Fs.PathName.init(fs.topLevelDirWithoutTrailingSlash());
         const destination_dir = std.fs.cwd();
 
@@ -112,7 +112,7 @@ pub const InitCommand = struct {
             if (package_json_file) |pkg| {
                 const stat = pkg.stat() catch break :read_package_json;
 
-                if (stat.kind != .File or stat.size == 0) {
+                if (stat.kind != .file or stat.size == 0) {
                     break :read_package_json;
                 }
                 package_json_contents = try MutableString.init(alloc, stat.size);
@@ -180,7 +180,7 @@ pub const InitCommand = struct {
 
                 for (paths_to_try) |path| {
                     if (exists(path)) {
-                        fields.entry_point = std.mem.span(path);
+                        fields.entry_point = bun.asByteSlice(path);
                         break :infer;
                     }
                 }
@@ -282,16 +282,32 @@ pub const InitCommand = struct {
                 break :brk true;
             };
 
+            const needs_typescript_dependency = brk: {
+                if (fields.object.get("devDependencies")) |deps| {
+                    if (deps.hasAnyPropertyNamed(&.{"typescript"})) {
+                        break :brk false;
+                    }
+                }
+
+                if (fields.object.get("peerDependencies")) |deps| {
+                    if (deps.hasAnyPropertyNamed(&.{"typescript"})) {
+                        break :brk false;
+                    }
+                }
+
+                break :brk true;
+            };
+
             if (needs_dev_dependencies) {
                 var dev_dependencies = fields.object.get("devDependencies") orelse js_ast.Expr.init(js_ast.E.Object, js_ast.E.Object{}, logger.Loc.Empty);
-                const version = comptime brk: {
-                    var base = Global.version;
-                    base.patch = 0;
-                    break :brk base;
-                };
-
-                try dev_dependencies.data.e_object.putString(alloc, "bun-types", comptime std.fmt.comptimePrint("^{any}", .{version.fmt("")}));
+                try dev_dependencies.data.e_object.putString(alloc, "bun-types", "latest");
                 try fields.object.put(alloc, "devDependencies", dev_dependencies);
+            }
+
+            if (needs_typescript_dependency) {
+                var peer_dependencies = fields.object.get("peer_dependencies") orelse js_ast.Expr.init(js_ast.E.Object, js_ast.E.Object{}, logger.Loc.Empty);
+                try peer_dependencies.data.e_object.putString(alloc, "typescript", "^5.0.0");
+                try fields.object.put(alloc, "peerDependencies", peer_dependencies);
             }
         }
 

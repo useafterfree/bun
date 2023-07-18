@@ -50,7 +50,7 @@ pub fn ComptimeClap(
         pub fn parse(iter: anytype, opt: clap.ParseOptions) !@This() {
             const allocator = opt.allocator;
             var multis = [_]std.ArrayList([]const u8){undefined} ** multi_options;
-            for (multis) |*multi| {
+            for (&multis) |*multi| {
                 multi.* = std.ArrayList([]const u8).init(allocator);
             }
 
@@ -76,7 +76,7 @@ pub fn ComptimeClap(
                 if (param.names.long == null and param.names.short == null) {
                     try pos.append(arg.value.?);
                     if (opt.stop_after_positional_at > 0 and pos.items.len >= opt.stop_after_positional_at) {
-                        const bun = @import("bun");
+                        const bun = @import("root").bun;
                         if (comptime bun.Environment.isWindows) @compileError(
                             "TODO: implement stop_after_positional_at on windows",
                         );
@@ -109,7 +109,7 @@ pub fn ComptimeClap(
                 }
             }
 
-            for (multis) |*multi, i|
+            for (&multis, 0..) |*multi, i|
                 res.multi_options[i] = try multi.toOwnedSlice();
             res.pos = try pos.toOwnedSlice();
             res.passthrough_positionals = try passthrough_positionals.toOwnedSlice();

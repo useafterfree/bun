@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Codeblog Corp
+ * Copyright (C) 2023 Codeblog Corp
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -47,13 +47,6 @@
 
 namespace WebCore {
 
-class VersionSqlite3 {
-public:
-  explicit VersionSqlite3(sqlite3* db) : db(db), version(0) {}
-  sqlite3* db;
-  std::atomic<uint64_t> version;
-};
-
 class JSSQLStatementConstructor final : public JSC::JSFunction {
 public:
     using Base = JSC::JSFunction;
@@ -67,9 +60,9 @@ public:
         return WebCore::subspaceForImpl<JSSQLStatementConstructor, WebCore::UseCustomHeapCellType::No>(
             vm,
             [](auto& spaces) { return spaces.m_clientSubspaceForJSSQLStatementConstructor.get(); },
-            [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForJSSQLStatementConstructor = WTFMove(space); },
+            [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForJSSQLStatementConstructor = std::forward<decltype(space)>(space); },
             [](auto& spaces) { return spaces.m_subspaceForJSSQLStatementConstructor.get(); },
-            [](auto& spaces, auto&& space) { spaces.m_subspaceForJSSQLStatementConstructor = WTFMove(space); });
+            [](auto& spaces, auto&& space) { spaces.m_subspaceForJSSQLStatementConstructor = std::forward<decltype(space)>(space); });
     }
 
     static void destroy(JSC::JSCell*);
@@ -78,13 +71,9 @@ public:
         return JSC::Structure::create(vm, globalObject, prototype, JSC::TypeInfo(JSC::ObjectType, StructureFlags), info());
     }
 
-    Vector<VersionSqlite3*> databases;
-    Vector<std::atomic<uint64_t>> schema_versions;
-
 private:
     JSSQLStatementConstructor(JSC::VM& vm, NativeExecutable* native, JSGlobalObject* globalObject, JSC::Structure* structure)
         : Base(vm, native, globalObject, structure)
-        , databases()
     {
     }
 

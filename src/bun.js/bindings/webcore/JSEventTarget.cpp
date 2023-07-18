@@ -59,12 +59,6 @@
 namespace WebCore {
 using namespace JSC;
 
-// Functions
-
-static JSC_DECLARE_HOST_FUNCTION(jsEventTargetPrototypeFunction_addEventListener);
-static JSC_DECLARE_HOST_FUNCTION(jsEventTargetPrototypeFunction_removeEventListener);
-static JSC_DECLARE_HOST_FUNCTION(jsEventTargetPrototypeFunction_dispatchEvent);
-
 // Attributes
 
 static JSC_DECLARE_CUSTOM_GETTER(jsEventTargetConstructor);
@@ -292,9 +286,9 @@ JSC::GCClient::IsoSubspace* JSEventTarget::subspaceForImpl(JSC::VM& vm)
     return WebCore::subspaceForImpl<JSEventTarget, UseCustomHeapCellType::No>(
         vm,
         [](auto& spaces) { return spaces.m_clientSubspaceForEventTarget.get(); },
-        [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForEventTarget = WTFMove(space); },
+        [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForEventTarget = std::forward<decltype(space)>(space); },
         [](auto& spaces) { return spaces.m_subspaceForEventTarget.get(); },
-        [](auto& spaces, auto&& space) { spaces.m_subspaceForEventTarget = WTFMove(space); });
+        [](auto& spaces, auto&& space) { spaces.m_subspaceForEventTarget = std::forward<decltype(space)>(space); });
 }
 
 template<typename Visitor>

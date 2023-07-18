@@ -1,5 +1,5 @@
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -11,9 +11,9 @@ const default_allocator = bun.default_allocator;
 const URL = @import("./url.zig").URL;
 const C = bun.C;
 const options = @import("./options.zig");
-const logger = @import("bun").logger;
-const js_ast = @import("./js_ast.zig");
-const js_lexer = @import("./js_lexer.zig");
+const logger = @import("root").bun.logger;
+const js_ast = bun.JSAst;
+const js_lexer = bun.js_lexer;
 const Defines = @import("./defines.zig");
 const ConditionsMap = @import("./resolver/package_json.zig").ESModule.ConditionsMap;
 const Api = @import("./api/schema.zig").Api;
@@ -25,7 +25,7 @@ pub const MacroMap = bun.StringArrayHashMapUnmanaged(MacroImportReplacementMap);
 pub const BundlePackageOverride = bun.StringArrayHashMapUnmanaged(options.BundleOverride);
 const LoaderMap = bun.StringArrayHashMapUnmanaged(options.Loader);
 const Analytics = @import("./analytics.zig");
-const JSONParser = @import("./json_parser.zig");
+const JSONParser = bun.JSON;
 const Command = @import("cli.zig").Command;
 const TOML = @import("./toml/toml_parser.zig").TOML;
 
@@ -118,6 +118,32 @@ pub const Bunfig = struct {
             };
         }
 
+        fn loadPreload(
+            this: *Parser,
+            allocator: std.mem.Allocator,
+            expr: js_ast.Expr,
+        ) !void {
+            if (expr.asArray()) |array_| {
+                var array = array_;
+                var preloads = try std.ArrayList(string).initCapacity(allocator, array.array.items.len);
+                errdefer preloads.deinit();
+                while (array.next()) |item| {
+                    try this.expect(item, .e_string);
+                    if (item.data.e_string.len() > 0)
+                        preloads.appendAssumeCapacity(try item.data.e_string.string(allocator));
+                }
+                this.ctx.preloads = preloads.items;
+            } else if (expr.data == .e_string) {
+                if (expr.data.e_string.len() > 0) {
+                    var preloads = try allocator.alloc(string, 1);
+                    preloads[0] = try expr.data.e_string.string(allocator);
+                    this.ctx.preloads = preloads;
+                }
+            } else if (expr.data != .e_null) {
+                try this.addError(expr.loc, "Expected preload to be an array");
+            }
+        }
+
         pub fn parse(this: *Parser, comptime cmd: Command.Tag) !void {
             const json = this.json;
             var allocator = this.allocator;
@@ -169,6 +195,17 @@ pub const Bunfig = struct {
                         }
                     }
                 }
+
+                if (json.get("preload")) |expr| {
+                    try this.loadPreload(allocator, expr);
+                }
+            }
+
+            if (comptime cmd == .RunCommand or cmd == .AutoCommand) {
+                if (json.get("smol")) |expr| {
+                    try this.expect(expr, .e_boolean);
+                    this.ctx.runtime_options.smol = expr.data.e_boolean.value;
+                }
             }
 
             if (comptime cmd == .DevCommand or cmd == .AutoCommand) {
@@ -187,6 +224,23 @@ pub const Bunfig = struct {
                         if (this.bunfig.port.? == 0) {
                             this.bunfig.port = 3000;
                         }
+                    }
+                }
+            }
+
+            if (comptime cmd == .TestCommand) {
+                if (json.get("test")) |test_| {
+                    if (test_.get("root")) |root| {
+                        this.ctx.debug.test_directory = root.asString(this.allocator) orelse "";
+                    }
+
+                    if (test_.get("preload")) |expr| {
+                        try this.loadPreload(allocator, expr);
+                    }
+
+                    if (test_.get("smol")) |expr| {
+                        try this.expect(expr, .e_boolean);
+                        this.ctx.runtime_options.smol = expr.data.e_boolean.value;
                     }
                 }
             }
@@ -214,6 +268,14 @@ pub const Bunfig = struct {
                         } else {
                             try this.addError(auto_install_expr.loc, "Invalid auto install setting, must be one of true, false, or \"force\" \"fallback\" \"disable\"");
                             return;
+                        }
+                    }
+
+                    if (json.get("exact")) |exact_install_expr| {
+                        try this.expect(exact_install_expr, .e_boolean);
+
+                        if (exact_install_expr.asBool().?) {
+                            install.exact = true;
                         }
                     }
 
@@ -248,7 +310,7 @@ pub const Bunfig = struct {
                             if (name_.len == 0) continue;
                             const name = if (name_[0] == '@') name_[1..] else name_;
                             var index = names.items.len;
-                            for (names.items) |comparator, i| {
+                            for (names.items, 0..) |comparator, i| {
                                 if (strings.eql(name, comparator)) {
                                     index = i;
                                     break;
@@ -277,6 +339,12 @@ pub const Bunfig = struct {
                     if (_bun.get("production")) |production| {
                         if (production.asBool()) |value| {
                             install.production = value;
+                        }
+                    }
+
+                    if (_bun.get("frozenLockfile")) |frozen_lockfile| {
+                        if (frozen_lockfile.asBool()) |value| {
+                            install.frozen_lockfile = value;
                         }
                     }
 
@@ -388,7 +456,7 @@ pub const Bunfig = struct {
             }
 
             if (json.get("bundle")) |_bun| {
-                if (comptime cmd == .DevCommand or cmd == .BuildCommand or cmd == .RunCommand or cmd == .AutoCommand or cmd == .BunCommand) {
+                if (comptime cmd == .DevCommand or cmd == .BuildCommand or cmd == .RunCommand or cmd == .AutoCommand or cmd == .BuildCommand) {
                     if (_bun.get("saveTo")) |file| {
                         try this.expect(file, .e_string);
                         this.bunfig.node_modules_bundle_path = try file.data.e_string.string(allocator);
@@ -400,7 +468,7 @@ pub const Bunfig = struct {
                     }
                 }
 
-                if (comptime cmd == .BunCommand) {
+                if (comptime cmd == .BuildCommand) {
                     if (_bun.get("logLevel")) |expr2| {
                         try this.loadLogLevel(expr2);
                     }
@@ -409,7 +477,7 @@ pub const Bunfig = struct {
                         try this.expect(entryPoints, .e_array);
                         const items = entryPoints.data.e_array.items.slice();
                         var names = try this.allocator.alloc(string, items.len);
-                        for (items) |item, i| {
+                        for (items, 0..) |item, i| {
                             try this.expect(item, .e_string);
                             names[i] = try item.data.e_string.string(allocator);
                         }
@@ -515,7 +583,7 @@ pub const Bunfig = struct {
             }
 
             switch (comptime cmd) {
-                .AutoCommand, .DevCommand, .BuildCommand, .BunCommand => {
+                .AutoCommand, .DevCommand, .BuildCommand => {
                     if (json.get("publicDir")) |public_dir| {
                         try this.expect(public_dir, .e_string);
                         this.bunfig.router = Api.RouteConfig{
@@ -537,8 +605,13 @@ pub const Bunfig = struct {
             }
 
             if (json.get("macros")) |expr| {
-                // technical debt
-                this.ctx.debug.macros = PackageJSON.parseMacrosJSON(allocator, expr, this.log, this.source);
+                if (expr.data == .e_boolean) {
+                    if (expr.data.e_boolean.value == false) {
+                        this.ctx.debug.macros = .{ .disable = {} };
+                    }
+                } else {
+                    this.ctx.debug.macros = .{ .map = PackageJSON.parseMacrosJSON(allocator, expr, this.log, this.source) };
+                }
                 Analytics.Features.macros = true;
             }
 
@@ -552,7 +625,7 @@ pub const Bunfig = struct {
                     .e_array => |array| {
                         var externals = try allocator.alloc(string, array.items.len);
 
-                        for (array.items.slice()) |item, i| {
+                        for (array.items.slice(), 0..) |item, i| {
                             try this.expect(item, .e_string);
                             externals[i] = try item.data.e_string.string(allocator);
                         }
@@ -576,11 +649,11 @@ pub const Bunfig = struct {
                 var loader_names = try this.allocator.alloc(string, properties.len);
                 var loader_values = try this.allocator.alloc(Api.Loader, properties.len);
 
-                for (properties) |item, i| {
+                for (properties, 0..) |item, i| {
                     var key = item.key.?.asString(allocator).?;
                     if (key.len == 0) continue;
                     if (key[0] != '.') {
-                        try this.addError(item.key.?.loc, "file extension must start with a dot");
+                        try this.addError(item.key.?.loc, "file extension for loader must start with a '.'");
                     }
                     var value = item.value.?;
                     try this.expect(value, .e_string);

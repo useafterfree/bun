@@ -1,6 +1,6 @@
 // const c = @import("./c.zig");
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -17,9 +17,9 @@ const ApiReader = @import("./api/schema.zig").Reader;
 const ApiWriter = @import("./api/schema.zig").Writer;
 const ByteApiWriter = @import("./api/schema.zig").ByteWriter;
 const NewApiWriter = @import("./api/schema.zig").Writer;
-const js_ast = @import("./js_ast.zig");
-const bundler = @import("bundler.zig");
-const logger = @import("bun").logger;
+const js_ast = bun.JSAst;
+const bundler = bun.bundler;
+const logger = @import("root").bun.logger;
 const Fs = @import("./fs.zig");
 const Options = @import("./options.zig");
 const Fallback = @import("./runtime.zig").Fallback;
@@ -34,25 +34,23 @@ const DotEnv = @import("./env_loader.zig");
 const mimalloc = @import("./allocators/mimalloc.zig");
 const MacroMap = @import("./resolver/package_json.zig").MacroMap;
 const Analytics = @import("./analytics/analytics_thread.zig");
-const Arena = std.heap.ArenaAllocator;
+const Arena = @import("root").bun.ArenaAllocator;
 const ThreadlocalArena = @import("./mimalloc_arena.zig").Arena;
-const JSON = @import("./json_parser.zig");
+const JSON = bun.JSON;
 const DateTime = bun.DateTime;
-const ThreadPool = @import("bun").ThreadPool;
+const ThreadPool = @import("root").bun.ThreadPool;
 const SourceMap = @import("./sourcemap/sourcemap.zig");
 const ObjectPool = @import("./pool.zig").ObjectPool;
 const Lock = @import("./lock.zig").Lock;
 const RequestDataPool = ObjectPool([32_000]u8, null, false, 1);
 const ResolveWatcher = @import("./resolver/resolver.zig").ResolveWatcher;
-pub fn constStrToU8(s: string) []u8 {
-    return @intToPtr([*]u8, @ptrToInt(s.ptr))[0..s.len];
-}
+const constStrToU8 = bun.constStrToU8;
 
 pub const MutableStringAPIWriter = NewApiWriter(*MutableString);
 
 const os = std.os;
 
-const picohttp = @import("bun").picohttp;
+const picohttp = @import("root").bun.picohttp;
 const Header = picohttp.Header;
 const Request = picohttp.Request;
 const Response = picohttp.Response;
@@ -60,12 +58,12 @@ pub const Headers = picohttp.Headers;
 pub const MimeType = @import("./http/mime_type.zig");
 const Bundler = bundler.Bundler;
 const Websocket = @import("./http/websocket.zig");
-const JSPrinter = @import("./js_printer.zig");
+const JSPrinter = bun.js_printer;
 const watcher = @import("./watcher.zig");
 threadlocal var req_headers_buf: [100]picohttp.Header = undefined;
 threadlocal var res_headers_buf: [100]picohttp.Header = undefined;
 const sync = @import("./sync.zig");
-const JavaScript = @import("bun").JSC;
+const JavaScript = @import("root").bun.JSC;
 const JavaScriptCore = JavaScriptCore.C;
 const Syscall = JavaScript.Node.Syscall;
 const Router = @import("./router.zig");
@@ -396,7 +394,7 @@ pub const RequestContext = struct {
             }
 
             if (this.bundler.router.?.routeIndexByHash(match.hash)) |ind| {
-                route_index = @intCast(i32, ind);
+                route_index = @as(i32, @intCast(ind));
             }
 
             module_preload: {
@@ -439,7 +437,7 @@ pub const RequestContext = struct {
             .reason = step,
             .cwd = this.bundler.fs.top_level_dir,
             .problems = Api.Problems{
-                .code = @truncate(u16, @errorToInt(err)),
+                .code = @as(u16, @truncate(@intFromError(err))),
                 .name = @errorName(err),
                 .exceptions = exceptions,
                 .build = try log.toAPI(allocator),
@@ -478,7 +476,7 @@ pub const RequestContext = struct {
         if (!this.bundler.options.routes.static_dir_enabled) return null;
         const relative_path = this.url.path;
         var extension = this.url.extname;
-        var tmp_buildfile_buf = std.mem.span(&Bundler.tmp_buildfile_buf);
+        var tmp_buildfile_buf = Bundler.tmp_buildfile_buf[0..];
 
         // On Windows, we don't keep the directory handle open forever because Windows doesn't like that.
         const public_dir: std.fs.Dir = this.bundler.options.routes.static_dir_handle orelse std.fs.openDirAbsolute(this.bundler.options.routes.static_dir, .{}) catch |err| {
@@ -494,8 +492,8 @@ pub const RequestContext = struct {
 
         // Is it the index file?
         if (relative_unrooted_path.len == 0) {
-            // std.mem.copy(u8, &tmp_buildfile_buf, relative_unrooted_path);
-            // std.mem.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len..], "/"
+            // bun.copy(u8, &tmp_buildfile_buf, relative_unrooted_path);
+            // bun.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len..], "/"
             // Search for /index.html
             if (this.bundler.options.routes.single_page_app_routing and
                 this.bundler.options.routes.single_page_app_fd != 0)
@@ -520,8 +518,8 @@ pub const RequestContext = struct {
         while (_file == null and relative_unrooted_path.len > 1) {
             // When no extension is provided, it might be html
             if (extension.len == 0) {
-                std.mem.copy(u8, tmp_buildfile_buf, relative_unrooted_path[0..relative_unrooted_path.len]);
-                std.mem.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len..], ".html");
+                bun.copy(u8, tmp_buildfile_buf, relative_unrooted_path[0..relative_unrooted_path.len]);
+                bun.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len..], ".html");
 
                 if (public_dir.openFile(tmp_buildfile_buf[0 .. relative_unrooted_path.len + ".html".len], .{})) |file| {
                     _file = file;
@@ -531,12 +529,12 @@ pub const RequestContext = struct {
 
                 var _path: []u8 = undefined;
                 if (relative_unrooted_path[relative_unrooted_path.len - 1] == '/') {
-                    std.mem.copy(u8, tmp_buildfile_buf, relative_unrooted_path[0 .. relative_unrooted_path.len - 1]);
-                    std.mem.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len - 1 ..], "/index.html");
+                    bun.copy(u8, tmp_buildfile_buf, relative_unrooted_path[0 .. relative_unrooted_path.len - 1]);
+                    bun.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len - 1 ..], "/index.html");
                     _path = tmp_buildfile_buf[0 .. relative_unrooted_path.len - 1 + "/index.html".len];
                 } else {
-                    std.mem.copy(u8, tmp_buildfile_buf, relative_unrooted_path[0..relative_unrooted_path.len]);
-                    std.mem.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len..], "/index.html");
+                    bun.copy(u8, tmp_buildfile_buf, relative_unrooted_path[0..relative_unrooted_path.len]);
+                    bun.copy(u8, tmp_buildfile_buf[relative_unrooted_path.len..], "/index.html");
 
                     _path = tmp_buildfile_buf[0 .. relative_unrooted_path.len + "/index.html".len];
                 }
@@ -561,10 +559,10 @@ pub const RequestContext = struct {
             var stat = file.stat() catch return null;
             var absolute_path = resolve_path.joinAbs(this.bundler.options.routes.static_dir, .auto, relative_unrooted_path);
 
-            if (stat.kind == .SymLink) {
+            if (stat.kind == .sym_link) {
                 file.* = std.fs.openFileAbsolute(absolute_path, .{ .mode = .read_only }) catch return null;
 
-                absolute_path = std.os.getFdPath(
+                absolute_path = bun.getFdPath(
                     file.handle,
                     &Bundler.tmp_buildfile_buf,
                 ) catch return null;
@@ -572,7 +570,7 @@ pub const RequestContext = struct {
                 stat = file.stat() catch return null;
             }
 
-            if (stat.kind != .File) {
+            if (stat.kind != .file) {
                 file.close();
                 return null;
             }
@@ -675,7 +673,7 @@ pub const RequestContext = struct {
         _ = try ctx.writeSocket(writer.getWritten(), SOCKET_FLAGS);
     }
 
-    const AsyncIO = @import("bun").AsyncIO;
+    const AsyncIO = @import("root").bun.AsyncIO;
     pub fn writeSocket(ctx: *RequestContext, buf_: anytype, _: anytype) !usize {
         var total: usize = 0;
         var buf: []const u8 = buf_;
@@ -686,8 +684,9 @@ pub const RequestContext = struct {
                     if (erro == error.EBADF or erro == error.ECONNABORTED or erro == error.ECONNREFUSED) {
                         return error.SocketClosed;
                     }
-
-                    Output.prettyErrorln("send() error: {s}", .{err.toSystemError().message.slice()});
+                    const msg = err.toSystemError().message.toUTF8(bun.default_allocator);
+                    defer msg.deinit();
+                    Output.prettyErrorln("send() error: {s}", .{msg.slice()});
 
                     return erro;
                 },
@@ -731,7 +730,7 @@ pub const RequestContext = struct {
             SOCKET_FLAGS,
         );
 
-        ctx.status = @truncate(HTTPStatusCode, code);
+        ctx.status = @as(HTTPStatusCode, @truncate(code));
     }
 
     pub fn init(
@@ -1080,7 +1079,7 @@ pub const RequestContext = struct {
                                 .from_timestamp = from_timestamp,
                                 .loader = parse_result.loader.toAPI(),
                                 .module_path = this.bundler.fs.relativeTo(file_path_str),
-                                .blob_length = @truncate(u32, written),
+                                .blob_length = @as(u32, @truncate(written)),
                             },
                         },
                         .id = id,
@@ -1167,7 +1166,7 @@ pub const RequestContext = struct {
                                 .from_timestamp = from_timestamp,
                                 .loader = .css,
                                 .module_path = this.bundler.fs.relativeTo(file_path_str),
-                                .blob_length = @truncate(u32, count.written),
+                                .blob_length = @as(u32, @truncate(count.written)),
                                 // .log = std.mem.zeroes(Api.Log),
                             },
                         },
@@ -1433,7 +1432,7 @@ pub const RequestContext = struct {
             JavaScript.API.Bun.flushCSSImports();
             vm.flush();
 
-            Output.printElapsed(@intToFloat(f64, (handler.start_timer.read())) / std.time.ns_per_ms);
+            Output.printElapsed(@as(f64, @floatFromInt((handler.start_timer.read()))) / std.time.ns_per_ms);
 
             if (vm.bundler.options.framework.?.display_name.len > 0) {
                 Output.prettyError(
@@ -1461,7 +1460,7 @@ pub const RequestContext = struct {
             handler.start_timer = std.time.Timer.start() catch unreachable;
 
             Output.Source.configureThread();
-            @import("bun.js/javascript_core_c_api.zig").JSCInitialize();
+            bun.JSC.initialize();
 
             js_ast.Stmt.Data.Store.create(bun.default_allocator);
             js_ast.Expr.Data.Store.create(bun.default_allocator);
@@ -1472,6 +1471,8 @@ pub const RequestContext = struct {
                 null,
                 handler.log,
                 handler.env_loader,
+                true,
+                false,
             ) catch |err| {
                 handler.handleJSError(.create_vm, err) catch {};
                 javascript_disabled = true;
@@ -1485,6 +1486,7 @@ pub const RequestContext = struct {
             std.debug.assert(JavaScript.VirtualMachine.isLoaded());
             javascript_vm = vm;
             vm.bundler.options.origin = handler.origin;
+            vm.bundler.options.no_macros = handler.client_bundler.options.no_macros;
             const boot = vm.bundler.options.framework.?.server.path;
             std.debug.assert(boot.len > 0);
             errdefer vm.deinit();
@@ -1714,11 +1716,11 @@ pub const RequestContext = struct {
         pub var to_close: []*WebsocketHandler = &[_]*WebsocketHandler{};
 
         pub fn generateTimestamp(handler: *WebsocketHandler) u32 {
-            return @truncate(u32, handler.ctx.timer.read() / std.time.ns_per_ms);
+            return @as(u32, @truncate(handler.ctx.timer.read() / std.time.ns_per_ms));
         }
 
         pub fn toTimestamp(timestamp: u64) u32 {
-            return @truncate(u32, timestamp / std.time.ns_per_ms);
+            return @as(u32, @truncate(timestamp / std.time.ns_per_ms));
         }
 
         pub fn broadcast(message: []const u8) !void {
@@ -1895,7 +1897,7 @@ pub const RequestContext = struct {
                 const welcome_message = Api.WebsocketMessageWelcome{
                     .asset_prefix = handler.ctx.bundler.options.routes.asset_prefix_path,
                     .epoch = WebsocketHandler.toTimestamp(
-                        @intCast(u64, (handler.ctx.timer.started.timestamp.tv_sec * std.time.ns_per_s)) + @intCast(u64, handler.ctx.timer.started.timestamp.tv_nsec),
+                        @as(u64, @intCast((handler.ctx.timer.started.timestamp.tv_sec * std.time.ns_per_s))) + @as(u64, @intCast(handler.ctx.timer.started.timestamp.tv_nsec)),
                     ),
                     .javascript_reloader = reloader,
                     .cwd = handler.ctx.bundler.fs.top_level_dir,
@@ -2000,11 +2002,7 @@ pub const RequestContext = struct {
                                 // sometimes the final byte has incorrect data
                                 // we never end up using all those bytes
                                 if (handler.message_buffer.list.items.len > 0) {
-                                    @memset(
-                                        handler.message_buffer.list.items.ptr,
-                                        0,
-                                        @min(handler.message_buffer.list.items.len, 128),
-                                    );
+                                    @memset(handler.message_buffer.list.items[0..@min(handler.message_buffer.list.items.len, 128)], 0);
                                 }
                                 const build_result = handler.builder.build(request_id, cmd.timestamp, arena.allocator()) catch |err| {
                                     if (err == error.MissingWatchID) {
@@ -2087,7 +2085,7 @@ pub const RequestContext = struct {
                                                 socket_buffers[2] = iovec(build_result.bytes);
                                                 // we reuse the accept key buffer
                                                 // so we have a pointer that is not stack memory
-                                                handler.accept_key[0..@sizeOf(usize)].* = @bitCast([@sizeOf(usize)]u8, std.hash.Wyhash.hash(0, build_result.bytes));
+                                                handler.accept_key[0..@sizeOf(usize)].* = @as([@sizeOf(usize)]u8, @bitCast(bun.hash(build_result.bytes)));
                                                 socket_buffers[3] = iovec(handler.accept_key[0..4]);
                                                 socket_buffer_count = 4;
                                             }
@@ -2110,7 +2108,7 @@ pub const RequestContext = struct {
                             else => {
                                 Output.prettyErrorln(
                                     "<r>[Websocket]: Unknown cmd: <b>{d}<r>. This might be a version mismatch. Try updating your node_modules.bun",
-                                    .{@enumToInt(cmd.kind)},
+                                    .{@intFromEnum(cmd.kind)},
                                 );
                             },
                         }
@@ -2187,7 +2185,7 @@ pub const RequestContext = struct {
     };
 
     pub fn writeETag(this: *RequestContext, buffer: anytype) !bool {
-        const strong_etag = std.hash.Wyhash.hash(0, buffer);
+        const strong_etag = bun.hash(buffer);
         const etag_content_slice = std.fmt.bufPrintIntToSlice(strong_etag_buffer[0..49], strong_etag, 16, .upper, .{});
 
         this.appendHeader("ETag", etag_content_slice);
@@ -2245,13 +2243,15 @@ pub const RequestContext = struct {
         const send_body = ctx.method.hasBody();
 
         switch (result.file.value) {
+            .saved => {},
+
             .pending => |resolve_result| {
                 const path = resolve_result.pathConst() orelse {
                     try ctx.sendNoContent();
                     return;
                 };
 
-                const hash = Watcher.getHash(result.file.input.text);
+                const hash = Watcher.getHash(result.file.src_path.text);
                 const input_fd = if (ctx.watcher.indexOf(hash)) |ind|
                     if (ind > 0) ctx.watcher.watchlist.items(.fd)[ind] else null
                 else
@@ -2271,7 +2271,7 @@ pub const RequestContext = struct {
 
                     pub fn reserveNext(this: *SocketPrinterInternal, count: u32) anyerror![*]u8 {
                         try this.buffer.growIfNeeded(count);
-                        return @ptrCast([*]u8, &this.buffer.list.items.ptr[this.buffer.list.items.len]);
+                        return @as([*]u8, @ptrCast(&this.buffer.list.items.ptr[this.buffer.list.items.len]));
                     }
 
                     pub fn advanceBy(this: *SocketPrinterInternal, count: u32) void {
@@ -2387,7 +2387,7 @@ pub const RequestContext = struct {
 
                         if (send_sourcemap_info) {
                             // This will be cleared by the arena
-                            source_map_url = std.mem.span(chunky.rctx.getFullURLForSourceMap());
+                            source_map_url = bun.asByteSlice(chunky.rctx.getFullURLForSourceMap());
 
                             chunky.rctx.appendHeader("SourceMap", source_map_url);
                         }
@@ -2402,7 +2402,7 @@ pub const RequestContext = struct {
                             // Always cache css & json files, even big ones
                             // css is especially important because we want to try and skip having the browser parse it whenever we can
                             if (buf.len < 16 * 16 * 16 * 16 or chunky._loader == .css or chunky._loader == .json) {
-                                const strong_etag = std.hash.Wyhash.hash(0, buf);
+                                const strong_etag = bun.hash(buf);
                                 const etag_content_slice = std.fmt.bufPrintIntToSlice(strong_etag_buffer[0..49], strong_etag, 16, .upper, .{});
                                 chunky.rctx.appendHeader("ETag", etag_content_slice);
 
@@ -2447,7 +2447,7 @@ pub const RequestContext = struct {
                     SocketPrinterInternal.reserveNext,
                     SocketPrinterInternal.advanceBy,
                 );
-                const loader = ctx.bundler.options.loaders.get(result.file.input.name.ext) orelse .file;
+                const loader = ctx.bundler.options.loaders.get(result.file.src_path.name.ext) orelse .file;
 
                 var socket_printer = SocketPrinter.init(
                     SocketPrinterInternal.init(ctx, loader),
@@ -2511,7 +2511,7 @@ pub const RequestContext = struct {
                     if (written.input_fd) |written_fd| {
                         try ctx.watcher.addFile(
                             written_fd,
-                            result.file.input.text,
+                            result.file.src_path.text,
                             hash,
                             loader,
                             resolve_result.dirname_fd,
@@ -2536,7 +2536,7 @@ pub const RequestContext = struct {
                         .css => try ctx.sendNoContent(),
                         .toml, .js, .jsx, .ts, .tsx, .json => {
                             const buf = "export default {};";
-                            const strong_etag = comptime std.hash.Wyhash.hash(0, buf);
+                            const strong_etag = comptime bun.hash(buf);
                             const etag_content_slice = std.fmt.bufPrintIntToSlice(strong_etag_buffer[0..49], strong_etag, 16, .upper, .{});
                             ctx.appendHeader("ETag", etag_content_slice);
 
@@ -2573,8 +2573,8 @@ pub const RequestContext = struct {
 
                         if (ctx.watcher.addFile(
                             file.fd,
-                            result.file.input.text,
-                            Watcher.getHash(result.file.input.text),
+                            result.file.src_path.text,
+                            Watcher.getHash(result.file.src_path.text),
                             result.file.loader,
                             file.dir,
                             null,
@@ -2594,7 +2594,7 @@ pub const RequestContext = struct {
                 var weak_etag = std.hash.Wyhash.init(0);
                 weak_etag_buffer[0] = 'W';
                 weak_etag_buffer[1] = '/';
-                weak_etag.update(result.file.input.text);
+                weak_etag.update(result.file.src_path.text);
                 std.mem.writeIntNative(u64, weak_etag_tmp_buffer[0..8], result.file.size);
                 weak_etag.update(weak_etag_tmp_buffer[0..8]);
 
@@ -2656,19 +2656,19 @@ pub const RequestContext = struct {
                 }
 
                 if (FeatureFlags.strong_etags_for_built_files) {
-                    const did_send = ctx.writeETag(buffer) catch false;
+                    const did_send = ctx.writeETag(buffer.bytes) catch false;
                     if (did_send) return;
                 }
 
-                if (buffer.len == 0) {
+                if (buffer.bytes.len == 0) {
                     return try ctx.sendNoContent();
                 }
 
                 defer ctx.done();
                 try ctx.writeStatus(200);
-                try ctx.prepareToSendBody(buffer.len, false);
+                try ctx.prepareToSendBody(buffer.bytes.len, false);
                 if (!send_body) return;
-                _ = try ctx.writeSocket(buffer, SOCKET_FLAGS);
+                _ = try ctx.writeSocket(buffer.bytes, SOCKET_FLAGS);
             },
         }
     }
@@ -3085,37 +3085,37 @@ pub const RequestContext = struct {
             return true;
         }
 
-        if (ctx.url.path.len > "blob:".len) {
-            if (strings.eqlComptimeIgnoreLen(ctx.url.path[0.."blob:".len], "blob:")) {
-                try ctx.handleBlobURL(server);
-                return true;
-            }
+        if (strings.hasPrefixComptime(ctx.url.path, "blob:")) {
+            try ctx.handleBlobURL(server);
+            return true;
+        }
 
-            // From HTTP, we serve files with a hash modkey
-            // The format is
-            //    hash:${hash}/${ORIGINAL_PATH}
-            //    hash:abcdefg123/app/foo/my-file.jpeg
-            // The hash exists for browser cache invalidation
-            if (strings.eqlComptimeIgnoreLen(ctx.url.path[0.."hash:".len], "hash:")) {
-                var current = ctx.url.path;
-                current = current["hash:".len..];
-                if (strings.indexOfChar(current, '/')) |i| {
-                    current = current[i + 1 ..];
-                    ctx.url.path = current;
-                    return false;
-                }
+        // From HTTP, we serve files with a hash modkey
+        // The format is
+        //    hash:${hash}/${ORIGINAL_PATH}
+        //    hash:abcdefg123/app/foo/my-file.jpeg
+        // The hash exists for browser cache invalidation
+        if (strings.hasPrefixComptime(ctx.url.path, "hash:")) {
+            var current = ctx.url.path;
+            current = current["hash:".len..];
+            if (strings.indexOfChar(current, '/')) |i| {
+                current = current[i + 1 ..];
+                ctx.url.path = current;
+                return false;
             }
         }
 
-        const isMaybePrefix = ctx.url.path.len > "bun:".len;
-
-        if (isMaybePrefix and strings.eqlComptimeIgnoreLen(ctx.url.path[0.."bun:".len], "bun:")) {
+        if (strings.hasPrefixComptime(ctx.url.path, "bun:")) {
             try ctx.handleBunURL(server);
             return true;
-        } else if (isMaybePrefix and strings.eqlComptimeIgnoreLen(ctx.url.path[0.."src:".len], "src:")) {
+        }
+
+        if (strings.hasPrefixComptime(ctx.url.path, "src:")) {
             try ctx.handleSrcURL(server);
             return true;
-        } else if (isMaybePrefix and strings.eqlComptimeIgnoreLen(ctx.url.path[0.."abs:".len], "abs:")) {
+        }
+
+        if (strings.hasPrefixComptime(ctx.url.path, "abs:")) {
             try ctx.handleAbsURL(server);
             return true;
         }
@@ -3240,7 +3240,12 @@ pub const Server = struct {
 
     threadlocal var filechange_buf: [32]u8 = undefined;
     threadlocal var filechange_buf_hinted: [32]u8 = undefined;
-
+    pub fn onError(
+        _: *@This(),
+        err: anyerror,
+    ) void {
+        Output.prettyErrorln("<r>Watcher crashed: <red><b>{s}<r>", .{@errorName(err)});
+    }
     pub fn onFileUpdate(
         ctx: *Server,
         events: []watcher.WatchEvent,
@@ -3362,7 +3367,7 @@ pub const Server = struct {
                     if (entries_option) |dir_ent| {
                         var last_file_hash: Watcher.HashType = std.math.maxInt(Watcher.HashType);
                         for (affected) |changed_name_ptr| {
-                            const changed_name: []const u8 = std.mem.span((changed_name_ptr orelse continue));
+                            const changed_name: []u8 = (changed_name_ptr orelse continue)[0..];
                             if (changed_name.len == 0 or changed_name[0] == '~' or changed_name[0] == '.') continue;
 
                             const loader = (ctx.bundler.options.loaders.get(Fs.PathName.init(changed_name).ext) orelse .file);
@@ -3376,7 +3381,7 @@ pub const Server = struct {
                                         file_ent.entry.need_stat = true;
                                         path_string = file_ent.entry.abs_path;
                                         file_hash = Watcher.getHash(path_string.slice());
-                                        for (hashes) |hash, entry_id| {
+                                        for (hashes, 0..) |hash, entry_id| {
                                             if (hash == file_hash) {
                                                 file_descriptors[entry_id] = 0;
                                                 break;
@@ -3386,10 +3391,10 @@ pub const Server = struct {
                                         break :brk path_string.slice();
                                     } else {
                                         var file_path_without_trailing_slash = std.mem.trimRight(u8, file_path, std.fs.path.sep_str);
-                                        @memcpy(&_on_file_update_path_buf, file_path_without_trailing_slash.ptr, file_path_without_trailing_slash.len);
+                                        @memcpy(_on_file_update_path_buf[0..file_path_without_trailing_slash.len], file_path_without_trailing_slash);
                                         _on_file_update_path_buf[file_path_without_trailing_slash.len] = std.fs.path.sep;
 
-                                        @memcpy(_on_file_update_path_buf[file_path_without_trailing_slash.len + 1 ..].ptr, changed_name.ptr, changed_name.len);
+                                        @memcpy(_on_file_update_path_buf[file_path_without_trailing_slash.len + 1 .. changed_name.len], changed_name);
                                         const path_slice = _on_file_update_path_buf[0 .. file_path_without_trailing_slash.len + changed_name.len + 1];
                                         file_hash = Watcher.getHash(path_slice);
                                         break :brk path_slice;
@@ -3443,12 +3448,9 @@ pub const Server = struct {
             .kernel_backlog = 1280,
         });
         defer listener.deinit();
-        server.websocket_threadpool.stack_size = @truncate(
-            u32,
-            @min(
-                @max(128_000, Fs.FileSystem.RealFS.Limit.stack),
-                4_000_000,
-            ),
+        server.websocket_threadpool.stack_size = @min(
+            @max(128_000, Fs.FileSystem.RealFS.Limit.stack),
+            4_000_000,
         );
 
         // listener.setFastOpen(true) catch {};
@@ -3489,8 +3491,8 @@ pub const Server = struct {
             }
 
             if (attempts >= 10) {
-                var random_number = std.rand.DefaultPrng.init(@intCast(u64, std.time.milliTimestamp()));
-                const default_port = @intCast(u16, server.bundler.options.origin.getPort() orelse 3000);
+                var random_number = std.rand.DefaultPrng.init(@as(u64, @intCast(std.time.milliTimestamp())));
+                const default_port = @as(u16, @intCast(server.bundler.options.origin.getPort() orelse 3000));
                 Output.prettyErrorln(
                     "<r><red>error<r>: bun can't start because <b>port {d} is already in use<r>. Tried {d} - {d}. Try closing the other apps or manually passing bun a port\n\n  <r><cyan><b>bun --origin http://localhost:{d}/<r>\n",
                     .{
@@ -3505,9 +3507,8 @@ pub const Server = struct {
         }
 
         const addr = listener.listen_address;
-
-        if (port != addr.getPort()) {
-            server.bundler.options.origin.port = try std.fmt.allocPrint(server.allocator, "{d}", .{addr.getPort()});
+        if (server.bundler.options.origin.getPort() != addr.getPort()) {
+            server.bundler.options.origin = ZigURL.parse(try std.fmt.allocPrint(server.allocator, "{s}://{s}:{d}", .{ server.bundler.options.origin.displayProtocol(), server.bundler.options.origin.displayHostname(), addr.getPort() }));
         }
 
         const start_time = Global.getStartTime();
@@ -3714,7 +3715,7 @@ pub const Server = struct {
 
                     req_ctx.sendInternalError(error.InternalError) catch {};
                 }
-                const status = req_ctx.status orelse @intCast(HTTPStatusCode, 500);
+                const status = req_ctx.status orelse @as(HTTPStatusCode, @intCast(500));
 
                 if (log.msgs.items.len == 0) {
                     if (!did_print) {
@@ -3912,7 +3913,7 @@ pub const Server = struct {
             if (node_modules_bundle.getPackageIDByName(package_name) != null) return;
         }
 
-        _ = this.bundler.resolver.resolve(this.bundler.fs.top_level_dir, this.bundler.options.jsx.import_source, .internal) catch {
+        _ = this.bundler.resolver.resolve(this.bundler.fs.top_level_dir, this.bundler.options.jsx.importSource(), .internal) catch {
             // if they don't have React, they can't use fast refresh
             this.bundler.options.jsx.supports_fast_refresh = false;
             return;
@@ -3972,7 +3973,15 @@ pub const Server = struct {
 
         http_editor_context.name = debug.editor;
 
-        server.bundler.options.macro_remap = debug.macros orelse .{};
+        switch (debug.macros) {
+            .disable => {
+                server.bundler.options.no_macros = true;
+            },
+            .map => |macros| {
+                server.bundler.options.macro_remap = macros;
+            },
+            .unspecified => {},
+        }
 
         if (debug.fallback_only or server.bundler.env.map.get("BUN_DISABLE_BUN_JS") != null) {
             RequestContext.fallback_only = true;

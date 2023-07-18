@@ -1,14 +1,15 @@
 const EditorContext = @import("../open.zig").EditorContext;
-const Blob = @import("./webcore/response.zig").Blob;
-const default_allocator = @import("bun").default_allocator;
-const Output = @import("bun").Output;
+const Blob = JSC.WebCore.Blob;
+const default_allocator = @import("root").bun.default_allocator;
+const Output = @import("root").bun.Output;
 const RareData = @This();
 const Syscall = @import("./node/syscall.zig");
-const JSC = @import("bun").JSC;
+const JSC = @import("root").bun.JSC;
 const std = @import("std");
-const BoringSSL = @import("bun").BoringSSL;
-const bun = @import("bun");
+const BoringSSL = @import("root").bun.BoringSSL;
+const bun = @import("root").bun;
 const WebSocketClientMask = @import("../http/websocket_http_client.zig").Mask;
+const UUID = @import("./uuid.zig");
 
 boring_ssl_engine: ?*BoringSSL.ENGINE = null,
 editor_context: EditorContext = EditorContext{},
@@ -25,6 +26,20 @@ cleanup_hook: ?*CleanupHook = null,
 
 file_polls_: ?*JSC.FilePoll.HiveArray = null,
 
+global_dns_data: ?*JSC.DNS.GlobalData = null,
+
+mime_types: ?bun.HTTP.MimeType.Map = null,
+
+pub fn mimeTypeFromString(this: *RareData, allocator: std.mem.Allocator, str: []const u8) ?bun.HTTP.MimeType {
+    if (this.mime_types == null) {
+        this.mime_types = bun.HTTP.MimeType.createHashTable(
+            allocator,
+        ) catch @panic("Out of memory");
+    }
+
+    return this.mime_types.?.get(str);
+}
+
 pub fn filePolls(this: *RareData, vm: *JSC.VirtualMachine) *JSC.FilePoll.HiveArray {
     return this.file_polls_ orelse {
         this.file_polls_ = vm.allocator.create(JSC.FilePoll.HiveArray) catch unreachable;
@@ -33,13 +48,16 @@ pub fn filePolls(this: *RareData, vm: *JSC.VirtualMachine) *JSC.FilePoll.HiveArr
     };
 }
 
-pub fn nextUUID(this: *RareData) [16]u8 {
+pub fn nextUUID(this: *RareData) UUID {
     if (this.entropy_cache == null) {
         this.entropy_cache = default_allocator.create(EntropyCache) catch unreachable;
         this.entropy_cache.?.init();
     }
 
-    return this.entropy_cache.?.get();
+    this.entropy_cache.?.fill();
+
+    const bytes = this.entropy_cache.?.get();
+    return UUID.initWith(&bytes);
 }
 
 pub fn entropySlice(this: *RareData, len: usize) []u8 {
@@ -227,4 +245,12 @@ pub fn stdin(rare: *RareData) *Blob.Store {
         rare.stdin_store = store;
         break :brk store;
     };
+}
+
+pub fn globalDNSResolver(rare: *RareData, vm: *JSC.VirtualMachine) *JSC.DNS.DNSResolver {
+    if (rare.global_dns_data == null) {
+        rare.global_dns_data = JSC.DNS.GlobalData.init(vm.allocator, vm);
+    }
+
+    return &rare.global_dns_data.?.resolver;
 }

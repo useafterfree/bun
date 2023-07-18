@@ -1,4 +1,4 @@
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const StoredFileDescriptorType = bun.StoredFileDescriptorType;
@@ -11,10 +11,10 @@ const FeatureFlags = bun.FeatureFlags;
 const default_allocator = bun.default_allocator;
 const C = bun.C;
 
-const js_ast = @import("./js_ast.zig");
-const logger = @import("bun").logger;
-const js_parser = @import("./js_parser.zig");
-const json_parser = @import("./json_parser.zig");
+const js_ast = bun.JSAst;
+const logger = @import("root").bun.logger;
+const js_parser = bun.js_parser;
+const json_parser = bun.JSON;
 const options = @import("./options.zig");
 const Define = @import("./defines.zig").Define;
 const std = @import("std");
@@ -54,6 +54,7 @@ pub const Set = struct {
         };
     }
 };
+const debug = Output.scoped(.fs, false);
 pub const Fs = struct {
     const Entry = FsCacheEntry;
 
@@ -143,12 +144,24 @@ pub const Fs = struct {
         comptime use_shared_buffer: bool,
         _file_handle: ?StoredFileDescriptorType,
     ) !Entry {
+        return c.readFileWithAllocator(bun.fs_allocator, _fs, path, dirname_fd, use_shared_buffer, _file_handle);
+    }
+
+    pub fn readFileWithAllocator(
+        c: *Fs,
+        allocator: std.mem.Allocator,
+        _fs: *fs.FileSystem,
+        path: string,
+        dirname_fd: StoredFileDescriptorType,
+        comptime use_shared_buffer: bool,
+        _file_handle: ?StoredFileDescriptorType,
+    ) !Entry {
         var rfs = _fs.fs;
 
         var file_handle: std.fs.File = if (_file_handle) |__file| std.fs.File{ .handle = __file } else undefined;
 
         if (_file_handle == null) {
-            if (FeatureFlags.store_file_descriptors and dirname_fd > 0) {
+            if (FeatureFlags.store_file_descriptors and dirname_fd != bun.invalid_fd and dirname_fd > 0) {
                 file_handle = std.fs.Dir.openFile(std.fs.Dir{ .fd = dirname_fd }, std.fs.path.basename(path), .{ .mode = .read_only }) catch |err| brk: {
                     switch (err) {
                         error.FileNotFound => {
@@ -163,25 +176,29 @@ pub const Fs = struct {
                     }
                 };
             } else {
-                file_handle = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+                file_handle = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
             }
         }
 
+        debug("openat({d}, {s}) = {d}", .{ dirname_fd, path, file_handle.handle });
+
+        const will_close = rfs.needToCloseFiles() and _file_handle == null;
         defer {
-            if (rfs.needToCloseFiles() and _file_handle == null) {
+            if (will_close) {
+                debug("close({d})", .{file_handle.handle});
                 file_handle.close();
             }
         }
 
         const file = if (c.stream)
-            rfs.readFileWithHandle(path, null, file_handle, use_shared_buffer, c.sharedBuffer(), true) catch |err| {
+            rfs.readFileWithHandleAndAllocator(allocator, path, null, file_handle, use_shared_buffer, c.sharedBuffer(), true) catch |err| {
                 if (Environment.isDebug) {
                     Output.printError("{s}: readFile error -- {s}", .{ path, @errorName(err) });
                 }
                 return err;
             }
         else
-            rfs.readFileWithHandle(path, null, file_handle, use_shared_buffer, c.sharedBuffer(), false) catch |err| {
+            rfs.readFileWithHandleAndAllocator(allocator, path, null, file_handle, use_shared_buffer, c.sharedBuffer(), false) catch |err| {
                 if (Environment.isDebug) {
                     Output.printError("{s}: readFile error -- {s}", .{ path, @errorName(err) });
                 }
@@ -190,7 +207,7 @@ pub const Fs = struct {
 
         return Entry{
             .contents = file.contents,
-            .fd = if (FeatureFlags.store_file_descriptors) file_handle.handle else 0,
+            .fd = if (FeatureFlags.store_file_descriptors and !will_close) file_handle.handle else 0,
         };
     }
 };
@@ -221,7 +238,7 @@ pub const JavaScript = struct {
         defines: *Define,
         log: *logger.Log,
         source: *const logger.Source,
-    ) anyerror!?js_ast.Ast {
+    ) anyerror!?js_ast.Result {
         var temp_log = logger.Log.init(allocator);
         var parser = js_parser.Parser.init(opts, &temp_log, source, defines, allocator) catch {
             temp_log.appendToMaybeRecycled(log, source) catch {};
@@ -238,7 +255,7 @@ pub const JavaScript = struct {
         };
 
         temp_log.appendToMaybeRecycled(log, source) catch {};
-        return if (result.ok) result.ast else null;
+        return result;
     }
 
     pub fn scan(
@@ -250,6 +267,10 @@ pub const JavaScript = struct {
         log: *logger.Log,
         source: *const logger.Source,
     ) anyerror!void {
+        if (strings.trim(source.contents, "\n\t\r ").len == 0) {
+            return;
+        }
+
         var temp_log = logger.Log.init(allocator);
         defer temp_log.appendToMaybeRecycled(log, source) catch {};
 

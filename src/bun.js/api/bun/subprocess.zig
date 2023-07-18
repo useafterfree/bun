@@ -1,16 +1,16 @@
 const Bun = @This();
-const default_allocator = @import("bun").default_allocator;
-const bun = @import("bun");
+const default_allocator = @import("root").bun.default_allocator;
+const bun = @import("root").bun;
 const Environment = bun.Environment;
-const NetworkThread = @import("bun").HTTP.NetworkThread;
+const NetworkThread = @import("root").bun.HTTP.NetworkThread;
 const Global = bun.Global;
 const strings = bun.strings;
 const string = bun.string;
-const Output = @import("bun").Output;
-const MutableString = @import("bun").MutableString;
+const Output = @import("root").bun.Output;
+const MutableString = @import("root").bun.MutableString;
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const JSC = @import("bun").JSC;
+const JSC = @import("root").bun.JSC;
 const JSValue = JSC.JSValue;
 const JSGlobalObject = JSC.JSGlobalObject;
 const Which = @import("../../../which.zig");
@@ -189,20 +189,24 @@ pub const Subprocess = struct {
             }
         };
 
-        pub fn init(stdio: Stdio, fd: i32, _: *JSC.JSGlobalObject) Readable {
+        pub fn init(stdio: Stdio, fd: i32, allocator: std.mem.Allocator, max_size: u32) Readable {
             return switch (stdio) {
                 .inherit => Readable{ .inherit = {} },
                 .ignore => Readable{ .ignore = {} },
                 .pipe => brk: {
                     break :brk .{
                         .pipe = .{
-                            .buffer = undefined,
+                            .buffer = BufferedOutput.initWithAllocator(allocator, fd, max_size),
                         },
                     };
                 },
                 .path => Readable{ .ignore = {} },
-                .blob, .fd => Readable{ .fd = @intCast(bun.FileDescriptor, fd) },
-                else => unreachable,
+                .blob, .fd => Readable{ .fd = @as(bun.FileDescriptor, @intCast(fd)) },
+                .array_buffer => Readable{
+                    .pipe = .{
+                        .buffer = BufferedOutput.initWithSlice(fd, stdio.array_buffer.slice()),
+                    },
+                },
             };
         }
 
@@ -356,7 +360,7 @@ pub const Subprocess = struct {
             }
 
             // first appeared in Linux 5.1
-            const rc = std.os.linux.pidfd_send_signal(this.pidfd, @intCast(u8, sig), null, 0);
+            const rc = std.os.linux.pidfd_send_signal(this.pidfd, @as(u8, @intCast(sig)), null, 0);
 
             if (rc != 0) {
                 const errno = std.os.linux.getErrno(rc);
@@ -564,7 +568,7 @@ pub const Subprocess = struct {
     pub const BufferedOutput = struct {
         internal_buffer: bun.ByteList = .{},
         fifo: JSC.WebCore.FIFO = undefined,
-        auto_sizer: JSC.WebCore.AutoSizer = undefined,
+        auto_sizer: ?JSC.WebCore.AutoSizer = null,
         status: Status = .{
             .pending = {},
         },
@@ -584,13 +588,25 @@ pub const Subprocess = struct {
             };
         }
 
-        pub fn setup(this: *BufferedOutput, allocator: std.mem.Allocator, fd: bun.FileDescriptor, max_size: u32) void {
-            this.* = init(fd);
+        pub fn initWithSlice(fd: bun.FileDescriptor, slice: []u8) BufferedOutput {
+            return BufferedOutput{
+                // fixed capacity
+                .internal_buffer = bun.ByteList.initWithBuffer(slice),
+                .auto_sizer = null,
+                .fifo = JSC.WebCore.FIFO{
+                    .fd = fd,
+                },
+            };
+        }
+
+        pub fn initWithAllocator(allocator: std.mem.Allocator, fd: bun.FileDescriptor, max_size: u32) BufferedOutput {
+            var this = init(fd);
             this.auto_sizer = .{
                 .max = max_size,
                 .allocator = allocator,
                 .buffer = &this.internal_buffer,
             };
+            return this;
         }
 
         pub fn onRead(this: *BufferedOutput, result: JSC.WebCore.StreamResult) void {
@@ -612,7 +628,7 @@ pub const Subprocess = struct {
                 },
                 else => {
                     const slice = result.slice();
-                    this.internal_buffer.len += @truncate(u32, slice.len);
+                    this.internal_buffer.len += @as(u32, @truncate(slice.len));
                     if (slice.len > 0)
                         std.debug.assert(this.internal_buffer.contains(slice));
 
@@ -625,45 +641,79 @@ pub const Subprocess = struct {
         }
 
         pub fn readAll(this: *BufferedOutput) void {
-            while (@as(usize, this.internal_buffer.len) < this.auto_sizer.max and this.status == .pending) {
-                var stack_buffer: [8096]u8 = undefined;
-                var stack_buf: []u8 = stack_buffer[0..];
-                var buf_to_use = stack_buf;
-                var available = this.internal_buffer.available();
-                if (available.len >= stack_buf.len) {
-                    buf_to_use = available;
-                }
+            if (this.auto_sizer) |auto_sizer| {
+                while (@as(usize, this.internal_buffer.len) < auto_sizer.max and this.status == .pending) {
+                    var stack_buffer: [8096]u8 = undefined;
+                    var stack_buf: []u8 = stack_buffer[0..];
+                    var buf_to_use = stack_buf;
+                    var available = this.internal_buffer.available();
+                    if (available.len >= stack_buf.len) {
+                        buf_to_use = available;
+                    }
 
-                const result = this.fifo.read(buf_to_use, this.fifo.to_read);
+                    const result = this.fifo.read(buf_to_use, this.fifo.to_read);
 
-                switch (result) {
-                    .pending => {
-                        this.watch();
-                        return;
-                    },
-                    .err => |err| {
-                        this.status = .{ .err = err };
-                        this.fifo.close();
-
-                        return;
-                    },
-                    .done => {
-                        this.status = .{ .done = {} };
-                        this.fifo.close();
-                        return;
-                    },
-                    .read => |slice| {
-                        if (slice.ptr == stack_buf.ptr) {
-                            this.internal_buffer.append(this.auto_sizer.allocator, slice) catch @panic("out of memory");
-                        } else {
-                            this.internal_buffer.len += @truncate(u32, slice.len);
-                        }
-
-                        if (slice.len < buf_to_use.len) {
+                    switch (result) {
+                        .pending => {
                             this.watch();
                             return;
-                        }
-                    },
+                        },
+                        .err => |err| {
+                            this.status = .{ .err = err };
+                            this.fifo.close();
+
+                            return;
+                        },
+                        .done => {
+                            this.status = .{ .done = {} };
+                            this.fifo.close();
+                            return;
+                        },
+                        .read => |slice| {
+                            if (slice.ptr == stack_buf.ptr) {
+                                this.internal_buffer.append(auto_sizer.allocator, slice) catch @panic("out of memory");
+                            } else {
+                                this.internal_buffer.len += @as(u32, @truncate(slice.len));
+                            }
+
+                            if (slice.len < buf_to_use.len) {
+                                this.watch();
+                                return;
+                            }
+                        },
+                    }
+                }
+            } else {
+                while (this.internal_buffer.len < this.internal_buffer.cap and this.status == .pending) {
+                    var buf_to_use = this.internal_buffer.available();
+
+                    const result = this.fifo.read(buf_to_use, this.fifo.to_read);
+
+                    switch (result) {
+                        .pending => {
+                            this.watch();
+                            return;
+                        },
+                        .err => |err| {
+                            this.status = .{ .err = err };
+                            this.fifo.close();
+
+                            return;
+                        },
+                        .done => {
+                            this.status = .{ .done = {} };
+                            this.fifo.close();
+                            return;
+                        },
+                        .read => |slice| {
+                            this.internal_buffer.len += @as(u32, @truncate(slice.len));
+
+                            if (slice.len < buf_to_use.len) {
+                                this.watch();
+                                return;
+                            }
+                        },
+                    }
                 }
             }
         }
@@ -689,7 +739,9 @@ pub const Subprocess = struct {
                     // also no data at all
                     if (this.internal_buffer.len == 0) {
                         if (this.internal_buffer.cap > 0) {
-                            this.internal_buffer.deinitWithAllocator(this.auto_sizer.allocator);
+                            if (this.auto_sizer) |auto_sizer| {
+                                this.internal_buffer.deinitWithAllocator(auto_sizer.allocator);
+                            }
                         }
                         // so we return an empty stream
                         return JSC.WebCore.ReadableStream.fromJS(
@@ -829,7 +881,7 @@ pub const Subprocess = struct {
                     return Writable{ .buffered_input = buffered_input };
                 },
                 .fd => {
-                    return Writable{ .fd = @intCast(bun.FileDescriptor, fd) };
+                    return Writable{ .fd = @as(bun.FileDescriptor, @intCast(fd)) };
                 },
                 .inherit => {
                     return Writable{ .inherit = {} };
@@ -959,7 +1011,7 @@ pub const Subprocess = struct {
             if (signal.name()) |name|
                 return JSC.ZigString.init(name).toValueGC(global)
             else
-                return JSC.JSValue.jsNumber(@enumToInt(signal));
+                return JSC.JSValue.jsNumber(@intFromEnum(signal));
         }
 
         return JSC.JSValue.jsNull();
@@ -979,7 +1031,7 @@ pub const Subprocess = struct {
         secondaryArgsValue: ?JSValue,
         comptime is_sync: bool,
     ) JSValue {
-        var arena = std.heap.ArenaAllocator.init(bun.default_allocator);
+        var arena = @import("root").bun.ArenaAllocator.init(bun.default_allocator);
         defer arena.deinit();
         var allocator = arena.allocator();
 
@@ -1062,7 +1114,14 @@ pub const Subprocess = struct {
                 }
 
                 while (cmds_array.next()) |value| {
-                    argv.appendAssumeCapacity(value.getZigString(globalThis).toOwnedSliceZ(allocator) catch {
+                    const arg = value.getZigString(globalThis);
+
+                    // if the string is empty, ignore it, don't add it to the argv
+                    if (arg.len == 0) {
+                        continue;
+                    }
+
+                    argv.appendAssumeCapacity(arg.toOwnedSliceZ(allocator) catch {
                         globalThis.throw("out of memory", .{});
                         return .zero;
                     });
@@ -1076,11 +1135,15 @@ pub const Subprocess = struct {
 
             if (args != .zero and args.isObject()) {
                 if (args.get(globalThis, "cwd")) |cwd_| {
+                    // ignore definitely invalid cwd
                     if (!cwd_.isEmptyOrUndefinedOrNull()) {
-                        cwd = cwd_.getZigString(globalThis).toOwnedSliceZ(allocator) catch {
-                            globalThis.throw("out of memory", .{});
-                            return .zero;
-                        };
+                        const cwd_str = cwd_.getZigString(globalThis);
+                        if (cwd_str.len > 0) {
+                            cwd = cwd_str.toOwnedSliceZ(allocator) catch {
+                                globalThis.throw("out of memory", .{});
+                                return .zero;
+                            };
+                        }
                     }
                 }
 
@@ -1119,8 +1182,9 @@ pub const Subprocess = struct {
                             };
 
                             if (key.eqlComptime("PATH")) {
-                                PATH = bun.span(line["PATH=".len..]);
+                                PATH = bun.asByteSlice(line["PATH=".len..]);
                             }
+
                             env_array.append(allocator, line) catch {
                                 globalThis.throw("out of memory", .{});
                                 return .zero;
@@ -1180,7 +1244,7 @@ pub const Subprocess = struct {
         var actions = PosixSpawn.Actions.init() catch |err| return globalThis.handleError(err, "in posix_spawn");
         if (comptime Environment.isMac) {
             attr.set(
-                os.darwin.POSIX_SPAWN_CLOEXEC_DEFAULT | os.darwin.POSIX_SPAWN_SETSIGDEF | os.darwin.POSIX_SPAWN_SETSIGMASK,
+                bun.C.POSIX_SPAWN_CLOEXEC_DEFAULT | bun.C.POSIX_SPAWN_SETSIGDEF | bun.C.POSIX_SPAWN_SETSIGMASK,
             ) catch |err| return globalThis.handleError(err, "in posix_spawn");
         } else if (comptime Environment.isLinux) {
             attr.set(
@@ -1239,7 +1303,7 @@ pub const Subprocess = struct {
                 globalThis.throw("out of memory", .{});
                 return .zero;
             };
-            env = @ptrCast(@TypeOf(env), env_array.items.ptr);
+            env = @as(@TypeOf(env), @ptrCast(env_array.items.ptr));
         }
 
         const pid = brk: {
@@ -1257,7 +1321,7 @@ pub const Subprocess = struct {
                 }
             }
 
-            break :brk switch (PosixSpawn.spawnZ(argv.items[0].?, actions, attr, @ptrCast([*:null]?[*:0]const u8, argv.items[0..].ptr), env)) {
+            break :brk switch (PosixSpawn.spawnZ(argv.items[0].?, actions, attr, @as([*:null]?[*:0]const u8, @ptrCast(argv.items[0..].ptr)), env)) {
                 .err => |err| return err.toJSC(globalThis),
                 .result => |pid_| pid_,
             };
@@ -1265,7 +1329,7 @@ pub const Subprocess = struct {
 
         const pidfd: std.os.fd_t = brk: {
             if (Environment.isMac) {
-                break :brk @intCast(std.os.fd_t, pid);
+                break :brk @as(std.os.fd_t, @intCast(pid));
             }
 
             const kernel = @import("../../../analytics.zig").GenerateHeader.GeneratePlatform.kernelVersion();
@@ -1282,7 +1346,7 @@ pub const Subprocess = struct {
             );
 
             switch (std.os.linux.getErrno(fd)) {
-                .SUCCESS => break :brk @intCast(std.os.fd_t, fd),
+                .SUCCESS => break :brk @as(std.os.fd_t, @intCast(fd)),
                 else => |err| {
                     globalThis.throwValue(JSC.Node.Syscall.Error.fromCode(err, .open).toJSC(globalThis));
                     var status: u32 = 0;
@@ -1307,22 +1371,15 @@ pub const Subprocess = struct {
                 globalThis.throw("out of memory", .{});
                 return .zero;
             },
-            .stdout = Readable.init(stdio[std.os.STDOUT_FILENO], stdout_pipe[0], globalThis),
-            .stderr = Readable.init(stdio[std.os.STDERR_FILENO], stderr_pipe[0], globalThis),
+            // stdout and stderr only uses allocator and default_max_buffer_size if they are pipes and not a array buffer
+            .stdout = Readable.init(stdio[std.os.STDOUT_FILENO], stdout_pipe[0], jsc_vm.allocator, default_max_buffer_size),
+            .stderr = Readable.init(stdio[std.os.STDERR_FILENO], stderr_pipe[0], jsc_vm.allocator, default_max_buffer_size),
             .on_exit_callback = if (on_exit_callback != .zero) JSC.Strong.create(on_exit_callback, globalThis) else .{},
             .is_sync = is_sync,
         };
 
         if (subprocess.stdin == .pipe) {
             subprocess.stdin.pipe.signal = JSC.WebCore.Signal.init(&subprocess.stdin);
-        }
-
-        if (subprocess.stdout == .pipe and subprocess.stdout.pipe == .buffer) {
-            subprocess.stdout.pipe.buffer.setup(jsc_vm.allocator, stdout_pipe[0], default_max_buffer_size);
-        }
-
-        if (subprocess.stderr == .pipe and subprocess.stderr.pipe == .buffer) {
-            subprocess.stderr.pipe.buffer.setup(jsc_vm.allocator, stderr_pipe[0], default_max_buffer_size);
         }
 
         const out = if (comptime !is_sync)
@@ -1421,14 +1478,13 @@ pub const Subprocess = struct {
             jsc_vm.eventLoop().autoTick();
         }
 
-        // subprocess.wait(true);
         const exitCode = subprocess.exit_code orelse 1;
         const stdout = subprocess.stdout.toBufferedValue(globalThis);
         const stderr = subprocess.stderr.toBufferedValue(globalThis);
         subprocess.finalizeSync();
 
         const sync_value = JSC.JSValue.createEmptyObject(globalThis, 4);
-        sync_value.put(globalThis, JSC.ZigString.static("exitCode"), JSValue.jsNumber(@intCast(i32, exitCode)));
+        sync_value.put(globalThis, JSC.ZigString.static("exitCode"), JSValue.jsNumber(@as(i32, @intCast(exitCode))));
         sync_value.put(globalThis, JSC.ZigString.static("stdout"), stdout);
         sync_value.put(globalThis, JSC.ZigString.static("stderr"), stderr);
         sync_value.put(globalThis, JSC.ZigString.static("success"), JSValue.jsBoolean(exitCode == 0));
@@ -1475,13 +1531,13 @@ pub const Subprocess = struct {
             },
             .result => |result| {
                 if (std.os.W.IFEXITED(result.status)) {
-                    this.exit_code = @truncate(u8, std.os.W.EXITSTATUS(result.status));
+                    this.exit_code = @as(u8, @truncate(std.os.W.EXITSTATUS(result.status)));
                 }
 
                 if (std.os.W.IFSIGNALED(result.status)) {
-                    this.signal_code = @intToEnum(SignalCode, @truncate(u8, std.os.W.TERMSIG(result.status)));
+                    this.signal_code = @as(SignalCode, @enumFromInt(@as(u8, @truncate(std.os.W.TERMSIG(result.status)))));
                 } else if (std.os.W.IFSTOPPED(result.status)) {
-                    this.signal_code = @intToEnum(SignalCode, @truncate(u8, std.os.W.STOPSIG(result.status)));
+                    this.signal_code = @as(SignalCode, @enumFromInt(@as(u8, @truncate(std.os.W.STOPSIG(result.status)))));
                 }
 
                 if (!this.hasExited()) {
@@ -1553,7 +1609,7 @@ pub const Subprocess = struct {
                 &args,
             );
 
-            if (result.isAnyError(globalThis)) {
+            if (result.isAnyError()) {
                 globalThis.bunVM().onUnhandledError(globalThis, result);
             }
         }
@@ -1632,10 +1688,10 @@ pub const Subprocess = struct {
         if (blob.needsToReadFile()) {
             if (blob.store()) |store| {
                 if (store.data.file.pathlike == .fd) {
-                    if (store.data.file.pathlike.fd == @intCast(bun.FileDescriptor, i)) {
+                    if (store.data.file.pathlike.fd == @as(bun.FileDescriptor, @intCast(i))) {
                         stdio_array[i] = Stdio{ .inherit = {} };
                     } else {
-                        switch (@intCast(std.os.fd_t, i)) {
+                        switch (@as(std.os.fd_t, @intCast(i))) {
                             std.os.STDIN_FILENO => {
                                 if (i == std.os.STDERR_FILENO or i == std.os.STDOUT_FILENO) {
                                     globalThis.throwInvalidArguments("stdin cannot be used for stdout or stderr", .{});
@@ -1698,9 +1754,9 @@ pub const Subprocess = struct {
                 return false;
             }
 
-            const fd = @intCast(bun.FileDescriptor, fd_);
+            const fd = @as(bun.FileDescriptor, @intCast(fd_));
 
-            switch (@intCast(std.os.fd_t, i)) {
+            switch (@as(std.os.fd_t, @intCast(i))) {
                 std.os.STDIN_FILENO => {
                     if (i == std.os.STDERR_FILENO or i == std.os.STDOUT_FILENO) {
                         globalThis.throwInvalidArguments("stdin cannot be used for stdout or stderr", .{});

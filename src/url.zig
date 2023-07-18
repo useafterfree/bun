@@ -1,7 +1,7 @@
 const std = @import("std");
 const Api = @import("./api/schema.zig").Api;
 const resolve_path = @import("./resolver/resolve_path.zig");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -14,6 +14,8 @@ const C = bun.C;
 
 // This is close to WHATWG URL, but we don't want the validation errors
 pub const URL = struct {
+    const log = Output.scoped(.URL, false);
+
     hash: string = "",
     /// hostname, but with a port
     /// `localhost:3000`
@@ -161,7 +163,7 @@ pub const URL = struct {
 
         var buf_i: usize = 0;
         for (path_parts[0..path_end]) |part| {
-            std.mem.copy(u8, buf[buf_i..], part);
+            bun.copy(u8, buf[buf_i..], part);
             buf_i += part.len;
         }
         return resolve_path.normalizeStringBuf(buf[0..buf_i], out, false, .loose, false);
@@ -252,14 +254,14 @@ pub const URL = struct {
         }
 
         if (strings.indexOfChar(base[offset..], '?')) |q| {
-            offset += @intCast(u31, q);
+            offset += @as(u31, @intCast(q));
             url.path = base[path_offset..][0..q];
             can_update_path = false;
             url.search = base[offset..];
         }
 
         if (strings.indexOfChar(base[offset..], '#')) |hash| {
-            offset += @intCast(u31, hash);
+            offset += @as(u31, @intCast(hash));
             hash_offset = offset;
             if (can_update_path) {
                 url.path = base[path_offset..][0..hash];
@@ -273,8 +275,8 @@ pub const URL = struct {
 
         if (base.len > path_offset and base[path_offset] == '/' and offset > 0) {
             if (url.search.len > 0) {
-                url.pathname = base[path_offset..std.math.min(
-                    std.math.min(offset + url.search.len, base.len),
+                url.pathname = base[path_offset..@min(
+                    @min(offset + url.search.len, base.len),
                     hash_offset,
                 )];
             } else if (hash_offset < std.math.maxInt(u32)) {
@@ -287,8 +289,8 @@ pub const URL = struct {
         if (url.path.len > 1) {
             const trimmed = std.mem.trim(u8, url.path, "/");
             if (trimmed.len > 1) {
-                url.path = url.path[std.math.min(
-                    std.math.max(@ptrToInt(trimmed.ptr) - @ptrToInt(url.path.ptr), 1) - 1,
+                url.path = url.path[@min(
+                    @max(@intFromPtr(trimmed.ptr) - @intFromPtr(url.path.ptr), 1) - 1,
                     hash_offset,
                 )..];
             } else {
@@ -302,7 +304,7 @@ pub const URL = struct {
             url.pathname = "/";
         }
 
-        while (url.pathname.len > 1 and @bitCast(u16, url.pathname[0..2].*) == comptime std.mem.readIntNative(u16, "//")) {
+        while (url.pathname.len > 1 and @as(u16, @bitCast(url.pathname[0..2].*)) == comptime std.mem.readIntNative(u16, "//")) {
             url.pathname = url.pathname[1..];
         }
 
@@ -346,8 +348,8 @@ pub const URL = struct {
                     url.username = str[0..i];
                     return i + 1;
                 },
-                // if we reach a slash, there's no username
-                '/' => {
+                // if we reach a slash or "?", there's no username
+                '?', '/' => {
                     return null;
                 },
                 else => {},
@@ -372,8 +374,8 @@ pub const URL = struct {
                     if (Environment.allow_assert) std.debug.assert(str[i..].len < 2 or std.mem.readIntNative(u16, str[i..][0..2]) != std.mem.readIntNative(u16, "//"));
                     return i + 1;
                 },
-                // if we reach a slash, there's no password
-                '/' => {
+                // if we reach a slash or "?", there's no password
+                '?', '/' => {
                     return null;
                 },
                 else => {},
@@ -390,31 +392,61 @@ pub const URL = struct {
         url.hostname = "";
         url.port = "";
 
-        // look for the first "/"
-        // if we have a slash, anything before that is the host
-        // anything before the colon is the hostname
-        // anything after the colon but before the slash is the port
-        // the origin is the scheme before the slash
+        //if starts with "[" so its IPV6
+        if (str.len > 0 and str[0] == '[') {
+            i = 1;
+            var ipv6_i: ?u31 = null;
+            var colon_i: ?u31 = null;
 
-        var colon_i: ?u31 = null;
-        while (i < str.len) : (i += 1) {
-            colon_i = if (colon_i == null and str[i] == ':') i else colon_i;
-
-            switch (str[i]) {
-                // alright, we found the slash
-                '/' => {
-                    break;
-                },
-                else => {},
+            while (i < str.len) : (i += 1) {
+                ipv6_i = if (ipv6_i == null and str[i] == ']') i else ipv6_i;
+                colon_i = if (ipv6_i != null and colon_i == null and str[i] == ':') i else colon_i;
+                switch (str[i]) {
+                    // alright, we found the slash or "?"
+                    '?', '/' => {
+                        break;
+                    },
+                    else => {},
+                }
             }
-        }
 
-        url.host = str[0..i];
-        if (colon_i) |colon| {
-            url.hostname = str[0..colon];
-            url.port = str[colon + 1 .. i];
+            url.host = str[0..i];
+            if (ipv6_i) |ipv6| {
+                //hostname includes "[" and "]"
+                url.hostname = str[0 .. ipv6 + 1];
+            }
+
+            if (colon_i) |colon| {
+                url.port = str[colon + 1 .. i];
+            }
         } else {
-            url.hostname = str[0..i];
+
+            // look for the first "/" or "?"
+            // if we have a slash or "?", anything before that is the host
+            // anything before the colon is the hostname
+            // anything after the colon but before the slash is the port
+            // the origin is the scheme before the slash
+
+            var colon_i: ?u31 = null;
+            while (i < str.len) : (i += 1) {
+                colon_i = if (colon_i == null and str[i] == ':') i else colon_i;
+
+                switch (str[i]) {
+                    // alright, we found the slash or "?"
+                    '?', '/' => {
+                        break;
+                    },
+                    else => {},
+                }
+            }
+
+            url.host = str[0..i];
+            if (colon_i) |colon| {
+                url.hostname = str[0..colon];
+                url.port = str[colon + 1 .. i];
+            } else {
+                url.hostname = str[0..i];
+            }
         }
 
         return i;
@@ -510,12 +542,12 @@ pub const QueryStringMap = struct {
     }
 
     pub fn getIndex(this: *const QueryStringMap, input: string) ?usize {
-        const hash = std.hash.Wyhash.hash(0, input);
+        const hash = bun.hash(input);
         return std.mem.indexOfScalar(u64, this.list.items(.name_hash), hash);
     }
 
     pub fn get(this: *const QueryStringMap, input: string) ?string {
-        const hash = std.hash.Wyhash.hash(0, input);
+        const hash = bun.hash(input);
         const _slice = this.list.slice();
         const i = std.mem.indexOfScalar(u64, _slice.items(.name_hash), hash) orelse return null;
         return this.str(_slice.items(.value)[i]);
@@ -526,7 +558,7 @@ pub const QueryStringMap = struct {
     }
 
     pub fn getAll(this: *const QueryStringMap, input: string, target: []string) usize {
-        const hash = std.hash.Wyhash.hash(0, input);
+        const hash = bun.hash(input);
         const _slice = this.list.slice();
         return @call(.always_inline, getAllWithHashFromOffset, .{ this, target, hash, 0, _slice });
     }
@@ -601,12 +633,12 @@ pub const QueryStringMap = struct {
             var value = result.value;
             const name_slice = result.rawName(scanner.pathname.routename);
 
-            name.length = @truncate(u32, name_slice.len);
+            name.length = @as(u32, @truncate(name_slice.len));
             name.offset = buf_writer_pos;
             try writer.writeAll(name_slice);
-            buf_writer_pos += @truncate(u32, name_slice.len);
+            buf_writer_pos += @as(u32, @truncate(name_slice.len));
 
-            var name_hash: u64 = std.hash.Wyhash.hash(0, name_slice);
+            var name_hash: u64 = bun.hash(name_slice);
 
             value.length = PercentEncoding.decode(Writer, writer, result.rawValue(scanner.pathname.pathname)) catch continue;
             value.offset = buf_writer_pos;
@@ -627,9 +659,9 @@ pub const QueryStringMap = struct {
                 name.length = PercentEncoding.decode(Writer, writer, scanner.query.query_string[name.offset..][0..name.length]) catch continue;
                 name.offset = buf_writer_pos;
                 buf_writer_pos += name.length;
-                name_hash = std.hash.Wyhash.hash(0, buf.items[name.offset..][0..name.length]);
+                name_hash = bun.hash(buf.items[name.offset..][0..name.length]);
             } else {
-                name_hash = std.hash.Wyhash.hash(0, result.rawName(scanner.query.query_string));
+                name_hash = bun.hash(result.rawName(scanner.query.query_string));
                 if (std.mem.indexOfScalar(u64, list_slice.items(.name_hash), name_hash)) |index| {
 
                     // query string parameters should not override route parameters
@@ -694,7 +726,7 @@ pub const QueryStringMap = struct {
 
                 var name = result.name;
                 var value = result.value;
-                const name_hash: u64 = std.hash.Wyhash.hash(0, result.rawName(query_string));
+                const name_hash: u64 = bun.hash(result.rawName(query_string));
                 list.appendAssumeCapacity(Param{ .name = name, .value = value, .name_hash = name_hash });
             }
 
@@ -720,9 +752,9 @@ pub const QueryStringMap = struct {
                 name.length = PercentEncoding.decode(Writer, writer, query_string[name.offset..][0..name.length]) catch continue;
                 name.offset = buf_writer_pos;
                 buf_writer_pos += name.length;
-                name_hash = std.hash.Wyhash.hash(0, buf.items[name.offset..][0..name.length]);
+                name_hash = bun.hash(buf.items[name.offset..][0..name.length]);
             } else {
-                name_hash = std.hash.Wyhash.hash(0, result.rawName(query_string));
+                name_hash = bun.hash(result.rawName(query_string));
                 if (std.mem.indexOfScalar(u64, list_slice.items(.name_hash), name_hash)) |index| {
                     name = list_slice.items(.name)[index];
                 } else {
@@ -812,12 +844,333 @@ pub const PercentEncoding = struct {
                     // scan ahead assuming .writeAll is faster than .writeByte one at a time
                     while (i < input.len and input[i] != '%') : (i += 1) {}
                     try writer.writeAll(input[start..i]);
-                    written += @truncate(u32, i - start);
+                    written += @as(u32, @truncate(i - start));
                 },
             }
         }
 
         return written;
+    }
+};
+
+pub const FormData = struct {
+    fields: Map,
+    buffer: []const u8,
+    const log = Output.scoped(.FormData, false);
+
+    pub const Map = std.ArrayHashMapUnmanaged(
+        bun.Semver.String,
+        Field.Entry,
+        bun.Semver.String.ArrayHashContext,
+        false,
+    );
+
+    pub const Encoding = union(enum) {
+        URLEncoded: void,
+        Multipart: []const u8, // boundary
+
+        pub fn get(content_type: []const u8) ?Encoding {
+            if (strings.indexOf(content_type, "application/x-www-form-urlencoded") != null)
+                return Encoding{ .URLEncoded = {} };
+
+            if (strings.indexOf(content_type, "multipart/form-data") == null) return null;
+
+            const boundary = getBoundary(content_type) orelse return null;
+            return .{
+                .Multipart = boundary,
+            };
+        }
+    };
+
+    pub const AsyncFormData = struct {
+        encoding: Encoding,
+        allocator: std.mem.Allocator,
+
+        pub fn init(allocator: std.mem.Allocator, encoding: Encoding) !*AsyncFormData {
+            var this = try allocator.create(AsyncFormData);
+            this.* = AsyncFormData{
+                .encoding = switch (encoding) {
+                    .Multipart => .{
+                        .Multipart = try allocator.dupe(u8, encoding.Multipart),
+                    },
+                    else => encoding,
+                },
+                .allocator = allocator,
+            };
+            return this;
+        }
+
+        pub fn deinit(this: *AsyncFormData) void {
+            if (this.encoding == .Multipart)
+                this.allocator.free(this.encoding.Multipart);
+            this.allocator.destroy(this);
+        }
+
+        pub fn toJS(this: *AsyncFormData, global: *bun.JSC.JSGlobalObject, data: []const u8, promise: bun.JSC.AnyPromise) void {
+            if (this.encoding == .Multipart and this.encoding.Multipart.len == 0) {
+                log("AsnycFormData.toJS -> promise.reject missing boundary", .{});
+                promise.reject(global, bun.JSC.ZigString.init("FormData missing boundary").toErrorInstance(global));
+                return;
+            }
+
+            const js_value = bun.FormData.toJS(
+                global,
+                data,
+                this.encoding,
+            ) catch |err| {
+                log("AsnycFormData.toJS -> failed ", .{});
+                promise.reject(global, global.createErrorInstance("FormData {s}", .{@errorName(err)}));
+                return;
+            };
+            promise.resolve(global, js_value);
+        }
+    };
+
+    pub fn getBoundary(content_type: []const u8) ?[]const u8 {
+        const boundary_index = strings.indexOf(content_type, "boundary=") orelse return null;
+        const boundary_start = boundary_index + "boundary=".len;
+        const begin = content_type[boundary_start..];
+        if (begin.len == 0)
+            return null;
+
+        var boundary_end = strings.indexOfChar(begin, ';') orelse @as(u32, @truncate(begin.len));
+        if (begin[0] == '"' and boundary_end > 0 and begin[boundary_end -| 1] == '"') {
+            boundary_end -|= 1;
+            return begin[1..boundary_end];
+        }
+
+        return begin[0..boundary_end];
+    }
+
+    pub const Field = struct {
+        value: bun.Semver.String = .{},
+        filename: bun.Semver.String = .{},
+        content_type: bun.Semver.String = .{},
+        is_file: bool = false,
+        zero_count: u8 = 0,
+
+        pub const Entry = union(enum) {
+            field: Field,
+            list: bun.BabyList(Field),
+        };
+
+        pub const External = extern struct {
+            name: bun.JSC.ZigString,
+            value: bun.JSC.ZigString,
+            blob: ?*bun.JSC.WebCore.Blob = null,
+        };
+    };
+
+    pub fn toJS(globalThis: *bun.JSC.JSGlobalObject, input: []const u8, encoding: Encoding) !bun.JSC.JSValue {
+        switch (encoding) {
+            .URLEncoded => {
+                var str = bun.JSC.ZigString.fromUTF8(input);
+                return bun.JSC.DOMFormData.createFromURLQuery(globalThis, &str);
+            },
+            .Multipart => |boundary| return toJSFromMultipartData(globalThis, input, boundary),
+        }
+    }
+
+    pub fn toJSFromMultipartData(
+        globalThis: *bun.JSC.JSGlobalObject,
+        input: []const u8,
+        boundary: []const u8,
+    ) !bun.JSC.JSValue {
+        const form_data_value = bun.JSC.DOMFormData.create(globalThis);
+        form_data_value.ensureStillAlive();
+        var form = bun.JSC.DOMFormData.fromJS(form_data_value) orelse {
+            log("failed to create DOMFormData.fromJS", .{});
+            return error.@"failed to parse multipart data";
+        };
+        const Wrapper = struct {
+            globalThis: *bun.JSC.JSGlobalObject,
+            form: *bun.JSC.DOMFormData,
+
+            pub fn onEntry(wrap: *@This(), name: bun.Semver.String, field: Field, buf: []const u8) void {
+                var value_str = field.value.slice(buf);
+                var key = bun.JSC.ZigString.initUTF8(name.slice(buf));
+
+                if (field.is_file) {
+                    var filename_str = field.filename.slice(buf);
+
+                    var blob = bun.JSC.WebCore.Blob.create(value_str, bun.default_allocator, wrap.globalThis, false);
+                    defer blob.detach();
+                    var filename = bun.JSC.ZigString.initUTF8(filename_str);
+                    const content_type: []const u8 = brk: {
+                        if (!field.content_type.isEmpty()) {
+                            break :brk field.content_type.slice(buf);
+                        }
+                        if (filename_str.len > 0) {
+                            if (bun.HTTP.MimeType.byExtensionNoDefault(std.fs.path.extension(filename_str))) |mime| {
+                                break :brk mime.value;
+                            }
+                        }
+
+                        if (bun.HTTP.MimeType.sniff(value_str)) |mime| {
+                            break :brk mime.value;
+                        }
+
+                        break :brk "";
+                    };
+
+                    if (content_type.len > 0) {
+                        if (!field.content_type.isEmpty()) {
+                            blob.content_type_allocated = true;
+                            blob.content_type = bun.default_allocator.dupe(u8, content_type) catch @panic("failed to allocate memory for blob content type");
+                            blob.content_type_was_set = true;
+                        } else {
+                            blob.content_type = content_type;
+                            blob.content_type_was_set = false;
+                            blob.content_type_allocated = false;
+                        }
+                    }
+
+                    wrap.form.appendBlob(wrap.globalThis, &key, &blob, &filename);
+                } else {
+                    var value = bun.JSC.ZigString.initUTF8(value_str);
+                    wrap.form.append(&key, &value);
+                }
+            }
+        };
+
+        {
+            var wrap = Wrapper{
+                .globalThis = globalThis,
+                .form = form,
+            };
+
+            forEachMultipartEntry(input, boundary, *Wrapper, &wrap, Wrapper.onEntry) catch |err| {
+                log("failed to parse multipart data", .{});
+                return err;
+            };
+        }
+
+        return form_data_value;
+    }
+
+    pub fn forEachMultipartEntry(
+        input: []const u8,
+        boundary: []const u8,
+        comptime Ctx: type,
+        ctx: Ctx,
+        comptime iterator: fn (
+            Ctx,
+            bun.Semver.String,
+            Field,
+            string,
+        ) void,
+    ) !void {
+        var slice = input;
+        var subslicer = bun.Semver.SlicedString.init(input, input);
+
+        var buf: [76]u8 = undefined;
+        {
+            const final_boundary = std.fmt.bufPrint(&buf, "--{s}--", .{boundary}) catch |err| {
+                if (err == error.NoSpaceLeft) {
+                    return error.@"boundary is too long";
+                }
+
+                return err;
+            };
+            const final_boundary_index = strings.lastIndexOf(input, final_boundary);
+            if (final_boundary_index == null) {
+                return error.@"missing final boundary";
+            }
+            slice = slice[0..final_boundary_index.?];
+        }
+
+        const separator = try std.fmt.bufPrint(&buf, "--{s}\r\n", .{boundary});
+        var splitter = strings.split(slice, separator);
+        _ = splitter.next(); // skip first boundary
+
+        while (splitter.next()) |chunk| {
+            var remain = chunk;
+            const header_end = strings.indexOf(remain, "\r\n\r\n") orelse return error.@"is missing header end";
+            const header = remain[0 .. header_end + 2];
+            remain = remain[header_end + 4 ..];
+
+            var field = Field{};
+            var name: bun.Semver.String = .{};
+            var filename: ?bun.Semver.String = null;
+            var header_chunk = header;
+            var is_file = false;
+            while (header_chunk.len > 0 and (filename == null or name.len() == 0)) {
+                const line_end = strings.indexOf(header_chunk, "\r\n") orelse return error.@"is missing header line end";
+                const line = header_chunk[0..line_end];
+                header_chunk = header_chunk[line_end + 2 ..];
+                const colon = strings.indexOf(line, ":") orelse return error.@"is missing header colon separator";
+
+                const key = line[0..colon];
+                var value = if (line.len > colon + 1) line[colon + 1 ..] else "";
+                if (strings.eqlCaseInsensitiveASCII(key, "content-disposition", true)) {
+                    value = strings.trim(value, " ");
+                    if (strings.hasPrefixComptime(value, "form-data;")) {
+                        value = value["form-data;".len..];
+                        value = strings.trim(value, " ");
+                    }
+
+                    while (strings.indexOf(value, "=")) |eql_start| {
+                        const eql_key = strings.trim(value[0..eql_start], " ;");
+                        value = value[eql_start + 1 ..];
+                        if (strings.hasPrefixComptime(value, "\"")) {
+                            value = value[1..];
+                        }
+
+                        var field_value = value;
+                        {
+                            var i: usize = 0;
+                            while (i < field_value.len) : (i += 1) {
+                                switch (field_value[i]) {
+                                    '"' => {
+                                        field_value = field_value[0..i];
+                                        break;
+                                    },
+                                    '\\' => {
+                                        i += @intFromBool(field_value.len > i + 1 and field_value[i + 1] == '"');
+                                    },
+                                    // the spec requires a end quote, but some browsers don't send it
+                                    else => {},
+                                }
+                            }
+                            value = value[@min(i + 1, value.len)..];
+                        }
+
+                        if (strings.eqlCaseInsensitiveASCII(eql_key, "name", true)) {
+                            name = subslicer.sub(field_value).value();
+                        } else if (strings.eqlCaseInsensitiveASCII(eql_key, "filename", true)) {
+                            filename = subslicer.sub(field_value).value();
+                            is_file = true;
+                        }
+
+                        if (!name.isEmpty() and filename != null) {
+                            break;
+                        }
+
+                        if (strings.indexOfChar(value, ';')) |semi_start| {
+                            value = value[semi_start + 1 ..];
+                        } else {
+                            break;
+                        }
+                    }
+                } else if (value.len > 0 and field.content_type.isEmpty() and strings.eqlCaseInsensitiveASCII(key, "content-type", true)) {
+                    field.content_type = subslicer.sub(strings.trim(value, "; \t")).value();
+                }
+            }
+
+            if (name.len() + @as(usize, field.zero_count) == 0) {
+                continue;
+            }
+
+            var body = remain;
+            if (strings.endsWithComptime(body, "\r\n")) {
+                body = body[0 .. body.len - 2];
+            }
+            field.value = subslicer.sub(body).value();
+            field.filename = filename orelse .{};
+            field.is_file = is_file;
+
+            iterator(ctx, name, field, input);
+        }
     }
 };
 
@@ -854,8 +1207,8 @@ fn stringPointerFromStrings(parent: string, in: string) Api.StringPointer {
             }
 
             return Api.StringPointer{
-                .offset = @truncate(u32, i),
-                .length = @truncate(u32, in.len),
+                .offset = @as(u32, @truncate(i)),
+                .length = @as(u32, @truncate(in.len)),
             };
         }
     }
@@ -948,7 +1301,7 @@ pub const Scanner = struct {
 
             var slice = this.query_string[this.i..];
             relative_i = 0;
-            var name = Api.StringPointer{ .offset = @truncate(u32, this.i), .length = 0 };
+            var name = Api.StringPointer{ .offset = @as(u32, @truncate(this.i)), .length = 0 };
             var value = Api.StringPointer{ .offset = 0, .length = 0 };
             var name_needs_decoding = false;
 
@@ -956,10 +1309,10 @@ pub const Scanner = struct {
                 const char = slice[relative_i];
                 switch (char) {
                     '=' => {
-                        name.length = @truncate(u32, relative_i);
+                        name.length = @as(u32, @truncate(relative_i));
                         relative_i += 1;
 
-                        value.offset = @truncate(u32, relative_i + this.i);
+                        value.offset = @as(u32, @truncate(relative_i + this.i));
 
                         const offset = relative_i;
                         var value_needs_decoding = false;
@@ -969,7 +1322,7 @@ pub const Scanner = struct {
                                 else => false,
                             };
                         }
-                        value.length = @truncate(u32, relative_i - offset);
+                        value.length = @as(u32, @truncate(relative_i - offset));
                         // If the name is empty and it's just a value, skip it.
                         // This is kind of an opinion. But, it's hard to see where that might be intentional.
                         if (name.length == 0) return null;
@@ -981,7 +1334,7 @@ pub const Scanner = struct {
                     '&' => {
                         // key&
                         if (relative_i > 0) {
-                            name.length = @truncate(u32, relative_i);
+                            name.length = @as(u32, @truncate(relative_i));
                             return Result{ .name = name, .value = value, .name_needs_decoding = name_needs_decoding, .value_needs_decoding = false };
                         }
 
@@ -1002,7 +1355,7 @@ pub const Scanner = struct {
                 return null;
             }
 
-            name.length = @truncate(u32, relative_i);
+            name.length = @as(u32, @truncate(relative_i));
             return Result{ .name = name, .value = value, .name_needs_decoding = name_needs_decoding };
         }
     }
@@ -1081,7 +1434,7 @@ test "Scanner.next - % encoded" {
 
 test "PercentEncoding.decode" {
     var buffer: [4096]u8 = undefined;
-    std.mem.set(u8, &buffer, 0);
+    @memset(&buffer, 0);
 
     var stream = std.io.fixedBufferStream(&buffer);
     var writer = stream.writer();
@@ -1161,7 +1514,7 @@ test "QueryStringMap (full)" {
     var target: [fixture.ext.len]string = undefined;
     try expect((map.getAll("ext", &target)) == fixture.ext.len);
 
-    for (target) |item, i| {
+    for (target, 0..) |item, i| {
         try expectString(
             fixture.ext[i],
             item,
@@ -1175,7 +1528,7 @@ test "QueryStringMap not encoded" {
         .hey = "1",
         .wow = "true",
     };
-    const url_slice = std.mem.span(url);
+    const url_slice = bun.asByteSlice(url);
     var map = (try QueryStringMap.init(std.testing.allocator, url_slice)) orelse return try std.testing.expect(false);
     try expect(map.buffer.len == 0);
     try expect(url_slice.ptr == map.slice.ptr);
@@ -1219,7 +1572,7 @@ test "QueryStringMap Iterator" {
     var map = (try QueryStringMap.init(std.testing.allocator, url)) orelse return try std.testing.expect(false);
     defer map.deinit();
     var buf_: [48]string = undefined;
-    var buf = std.mem.span(&buf_);
+    var buf = buf_[0..48];
     var iter = map.iter();
 
     var result: QueryStringMap.Iterator.Result = iter.next(buf) orelse return try expect(false);
@@ -1289,7 +1642,7 @@ test "QueryStringMap Iterator" {
     result = iter.next(buf) orelse return try expect(false);
     try expectString("ext", result.name);
     try expectEqual(result.values.len, fixture.ext.len);
-    for (fixture.ext) |ext, i| {
+    for (fixture.ext, 0..) |ext, i| {
         try expectString(ext, result.values[i]);
     }
 

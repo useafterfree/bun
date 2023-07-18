@@ -1,7 +1,7 @@
 const std = @import("std");
 const os = std.os;
 const math = std.math;
-const bun = @import("bun");
+const bun = @import("root").bun;
 
 pub const CopyFileRangeError = error{
     FileTooBig,
@@ -24,7 +24,7 @@ const CopyFileError = error{SystemResources} || CopyFileRangeError || os.SendFil
 // No metadata is transferred over.
 pub fn copyFile(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileError!void {
     if (comptime bun.Environment.isMac) {
-        const rc = os.system.fcopyfile(fd_in, fd_out, null, os.system.COPYFILE_DATA);
+        const rc = os.system.fcopyfile(fd_in, fd_out, null, os.system.COPYFILE.DATA);
         switch (os.errno(rc)) {
             .SUCCESS => return,
             .INVAL => unreachable,
@@ -64,7 +64,7 @@ pub fn copyFile(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileError!void {
     }
 }
 
-const Platform = @import("bun").analytics.GenerateHeader.GeneratePlatform;
+const Platform = @import("root").bun.analytics.GenerateHeader.GeneratePlatform;
 
 var can_use_copy_file_range = std.atomic.Atomic(i32).init(0);
 fn canUseCopyFileRangeSyscall() bool {
@@ -88,12 +88,12 @@ fn canUseCopyFileRangeSyscall() bool {
 const fd_t = std.os.fd_t;
 pub fn copyFileRange(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len: usize, flags: u32) CopyFileRangeError!usize {
     if (canUseCopyFileRangeSyscall()) {
-        var off_in_copy = @bitCast(i64, off_in);
-        var off_out_copy = @bitCast(i64, off_out);
+        var off_in_copy = @as(i64, @bitCast(off_in));
+        var off_out_copy = @as(i64, @bitCast(off_out));
 
         const rc = std.os.linux.copy_file_range(fd_in, &off_in_copy, fd_out, &off_out_copy, len, flags);
         switch (std.os.linux.getErrno(rc)) {
-            .SUCCESS => return @intCast(usize, rc),
+            .SUCCESS => return @as(usize, @intCast(rc)),
             .BADF => return error.FilesOpenedWithWrongFlags,
             .FBIG => return error.FileTooBig,
             .IO => return error.InputOutput,

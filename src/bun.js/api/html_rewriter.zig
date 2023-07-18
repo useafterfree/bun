@@ -4,13 +4,13 @@ const http = @import("../../http.zig");
 const JavaScript = @import("../javascript.zig");
 const QueryStringMap = @import("../../url.zig").QueryStringMap;
 const CombinedScanner = @import("../../url.zig").CombinedScanner;
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
-const JSC = @import("bun").JSC;
+const JSC = @import("root").bun.JSC;
 const js = JSC.C;
 const WebCore = @import("../webcore/response.zig");
 const Router = @This();
-const Bundler = @import("../../bundler.zig");
+const Bundler = bun.bundler;
 const VirtualMachine = JavaScript.VirtualMachine;
 const ScriptSrcStream = std.io.FixedBufferStream([]u8);
 const ZigString = JSC.ZigString;
@@ -21,14 +21,14 @@ const JSObject = JSC.JSObject;
 const JSError = Base.JSError;
 const JSValue = JSC.JSValue;
 const JSGlobalObject = JSC.JSGlobalObject;
-const strings = @import("bun").strings;
+const strings = @import("root").bun.strings;
 const NewClass = Base.NewClass;
 const To = Base.To;
 const Request = WebCore.Request;
 
 const FetchEvent = WebCore.FetchEvent;
 const Response = WebCore.Response;
-const LOLHTML = @import("bun").LOLHTML;
+const LOLHTML = @import("root").bun.LOLHTML;
 
 const SelectorMap = std.ArrayListUnmanaged(*LOLHTML.HTMLSelector);
 pub const LOLHTMLContext = struct {
@@ -106,7 +106,7 @@ pub const HTMLRewriter = struct {
 
         var selector = LOLHTML.HTMLSelector.parse(selector_slice) catch
             return throwLOLHTMLError(global);
-        var handler_ = ElementHandler.init(global, listener, exception);
+        var handler_ = ElementHandler.init(global, listener, exception) catch return .zero;
         if (exception.* != null) {
             selector.deinit();
             return JSValue.fromRef(exception.*);
@@ -154,7 +154,7 @@ pub const HTMLRewriter = struct {
         thisObject: JSC.C.JSObjectRef,
         exception: JSC.C.ExceptionRef,
     ) JSValue {
-        var handler_ = DocumentHandler.init(global, listener, exception);
+        var handler_ = DocumentHandler.init(global, listener, exception) catch return .zero;
         if (exception.* != null) {
             return JSValue.fromRef(exception.*);
         }
@@ -162,6 +162,7 @@ pub const HTMLRewriter = struct {
         var handler = getAllocator(global).create(DocumentHandler) catch unreachable;
         handler.* = handler_;
 
+        // If this fails, subsequent calls to write or end should throw
         this.builder.addDocumentContentHandlers(
             DocumentHandler,
             DocumentHandler.onDocType,
@@ -190,9 +191,7 @@ pub const HTMLRewriter = struct {
                 handler
             else
                 null,
-        ) catch {
-            return throwLOLHTMLError(global);
-        };
+        );
 
         this.context.document_handlers.append(bun.default_allocator, handler) catch unreachable;
         return JSValue.fromRef(thisObject);
@@ -447,9 +446,13 @@ pub const HTMLRewriter = struct {
                 },
             };
 
-            result.body.init.headers = original.body.init.headers;
             result.body.init.method = original.body.init.method;
             result.body.init.status_code = original.body.init.status_code;
+
+            // https://github.com/oven-sh/bun/issues/3334
+            if (original.body.init.headers) |headers| {
+                result.body.init.headers = headers.cloneThis(global);
+            }
 
             result.url = bun.default_allocator.dupe(u8, original.url) catch unreachable;
             result.status_text = bun.default_allocator.dupe(u8, original.status_text) catch unreachable;
@@ -473,13 +476,13 @@ pub const HTMLRewriter = struct {
         pub fn onFinishedLoading(sink: *BufferOutputSink, bytes: JSC.WebCore.Blob.Store.ReadFile.ResultType) void {
             switch (bytes) {
                 .err => |err| {
-                    if (sink.response.body.value == .Locked and @ptrToInt(sink.response.body.value.Locked.task) == @ptrToInt(sink) and
+                    if (sink.response.body.value == .Locked and @intFromPtr(sink.response.body.value.Locked.task) == @intFromPtr(sink) and
                         sink.response.body.value.Locked.promise == null)
                     {
                         sink.response.body.value = .{ .Empty = {} };
                         // is there a pending promise?
                         // we will need to reject it
-                    } else if (sink.response.body.value == .Locked and @ptrToInt(sink.response.body.value.Locked.task) == @ptrToInt(sink) and
+                    } else if (sink.response.body.value == .Locked and @intFromPtr(sink.response.body.value.Locked.task) == @intFromPtr(sink) and
                         sink.response.body.value.Locked.promise != null)
                     {
                         sink.response.body.value.Locked.onReceiveValue = null;
@@ -724,29 +727,44 @@ const DocumentHandler = struct {
         "onEndCallback",
     );
 
-    pub fn init(global: *JSGlobalObject, thisObject: JSValue, exception: JSC.C.ExceptionRef) DocumentHandler {
+    pub fn init(global: *JSGlobalObject, thisObject: JSValue, exception: JSC.C.ExceptionRef) !DocumentHandler {
         var handler = DocumentHandler{
             .thisObject = thisObject,
             .global = global,
         };
 
-        switch (thisObject.jsType()) {
-            .Object, .ProxyObject, .Cell, .FinalObject => {},
-            else => |kind| {
-                JSC.throwInvalidArguments(
-                    "Expected object but received {s}",
-                    .{@as(string, @tagName(kind))},
-                    global,
-                    exception,
-                );
-                return undefined;
-            },
+        if (!thisObject.isObject()) {
+            JSC.throwInvalidArguments(
+                "Expected object",
+                .{},
+                global,
+                exception,
+            );
+            return error.InvalidArguments;
+        }
+
+        errdefer {
+            if (handler.onDocTypeCallback) |cb| {
+                cb.unprotect();
+            }
+
+            if (handler.onCommentCallback) |cb| {
+                cb.unprotect();
+            }
+
+            if (handler.onTextCallback) |cb| {
+                cb.unprotect();
+            }
+
+            if (handler.onEndCallback) |cb| {
+                cb.unprotect();
+            }
         }
 
         if (thisObject.get(global, "doctype")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("doctype must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onDocTypeCallback = val;
@@ -755,7 +773,7 @@ const DocumentHandler = struct {
         if (thisObject.get(global, "comments")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("comments must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onCommentCallback = val;
@@ -764,7 +782,7 @@ const DocumentHandler = struct {
         if (thisObject.get(global, "text")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("text must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onTextCallback = val;
@@ -773,7 +791,7 @@ const DocumentHandler = struct {
         if (thisObject.get(global, "end")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("end must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onEndCallback = val;
@@ -864,29 +882,39 @@ const ElementHandler = struct {
     global: *JSGlobalObject,
     ctx: ?*HTMLRewriter.BufferOutputSink = null,
 
-    pub fn init(global: *JSGlobalObject, thisObject: JSValue, exception: JSC.C.ExceptionRef) ElementHandler {
+    pub fn init(global: *JSGlobalObject, thisObject: JSValue, exception: JSC.C.ExceptionRef) !ElementHandler {
         var handler = ElementHandler{
             .thisObject = thisObject,
             .global = global,
         };
+        errdefer {
+            if (handler.onCommentCallback) |cb| {
+                cb.unprotect();
+            }
 
-        switch (thisObject.jsType()) {
-            .Object, .ProxyObject, .Cell, .FinalObject => {},
-            else => |kind| {
-                JSC.throwInvalidArguments(
-                    "Expected object but received {s}",
-                    .{@as(string, @tagName(kind))},
-                    global,
-                    exception,
-                );
-                return undefined;
-            },
+            if (handler.onElementCallback) |cb| {
+                cb.unprotect();
+            }
+
+            if (handler.onTextCallback) |cb| {
+                cb.unprotect();
+            }
+        }
+
+        if (!thisObject.isObject()) {
+            JSC.throwInvalidArguments(
+                "Expected object",
+                .{},
+                global,
+                exception,
+            );
+            return error.InvalidArguments;
         }
 
         if (thisObject.get(global, "element")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("element must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onElementCallback = val;
@@ -895,7 +923,7 @@ const ElementHandler = struct {
         if (thisObject.get(global, "comments")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("comments must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onCommentCallback = val;
@@ -904,7 +932,7 @@ const ElementHandler = struct {
         if (thisObject.get(global, "text")) |val| {
             if (val.isUndefinedOrNull() or !val.isCell() or !val.isCallable(global.vm())) {
                 JSC.throwInvalidArguments("text must be a function", .{}, global, exception);
-                return undefined;
+                return error.InvalidArguments;
             }
             JSC.C.JSValueProtect(global, val.asObjectRef());
             handler.onTextCallback = val;
@@ -968,26 +996,14 @@ const getterWrap = JSC.getterWrap;
 const setterWrap = JSC.setterWrap;
 const wrap = JSC.wrapSync;
 
-pub fn free_html_writer_string(_: ?*anyopaque, ptr: ?*anyopaque, len: usize) callconv(.C) void {
-    var str = LOLHTML.HTMLString{ .ptr = bun.cast([*]const u8, ptr.?), .len = len };
-    str.deinit();
-}
-
 fn throwLOLHTMLError(global: *JSGlobalObject) JSValue {
-    var err = LOLHTML.HTMLString.lastError();
-    return ZigString.init(err.slice()).toErrorInstance(global);
+    const err = LOLHTML.HTMLString.lastError();
+    defer err.deinit();
+    return ZigString.fromUTF8(err.slice()).toErrorInstance(global);
 }
 
 fn htmlStringValue(input: LOLHTML.HTMLString, globalObject: *JSGlobalObject) JSValue {
-    var str = ZigString.init(
-        input.slice(),
-    );
-    str.detectEncoding();
-
-    return str.toExternalValueWithCallback(
-        globalObject,
-        free_html_writer_string,
-    );
+    return input.toJS(globalObject);
 }
 
 pub const TextChunk = struct {
@@ -1016,6 +1032,9 @@ pub const TextChunk = struct {
         .{
             .removed = .{
                 .get = getterWrap(TextChunk, "removed"),
+            },
+            .lastInTextNode = .{
+                .get = getterWrap(TextChunk, "lastInTextNode"),
             },
             .text = .{
                 .get = getterWrap(TextChunk, "getText"),
@@ -1083,6 +1102,10 @@ pub const TextChunk = struct {
 
     pub fn removed(this: *TextChunk, _: *JSGlobalObject) JSValue {
         return JSC.JSValue.jsBoolean(this.text_chunk.?.isRemoved());
+    }
+
+    pub fn lastInTextNode(this: *TextChunk, _: *JSGlobalObject) JSValue {
+        return JSC.JSValue.jsBoolean(this.text_chunk.?.isLastInTextNode());
     }
 
     pub fn finalize(this: *TextChunk) void {
@@ -1293,7 +1316,7 @@ pub const Comment = struct {
     pub fn getText(this: *Comment, global: *JSGlobalObject) JSValue {
         if (this.comment == null)
             return JSValue.jsNull();
-        return ZigString.init(this.comment.?.getText().slice()).withEncoding().toValueGC(global);
+        return this.comment.?.getText().toJS(global);
     }
 
     pub fn setText(
@@ -1423,7 +1446,7 @@ pub const EndTag = struct {
         if (this.end_tag == null)
             return JSC.JSValue.jsUndefined();
 
-        return ZigString.init(this.end_tag.?.getName().slice()).withEncoding().toValueGC(global);
+        return this.end_tag.?.getName().toJS(global);
     }
 
     pub fn setName(
@@ -1535,27 +1558,16 @@ pub const AttributeIterator = struct {
             return JSC.JSValue.jsNull();
         };
 
-        // TODO: don't clone here
         const value = attribute.value();
         const name = attribute.name();
-        defer name.deinit();
-        defer value.deinit();
 
-        var strs = [2]ZigString{
-            ZigString.init(name.slice()),
-            ZigString.init(value.slice()),
-        };
-
-        var valid_strs: []ZigString = strs[0..2];
-
-        var array = JSC.JSValue.createStringArray(
+        return bun.String.toJSArray(
             globalObject,
-            valid_strs.ptr,
-            valid_strs.len,
-            true,
+            &[_]bun.String{
+                name.toString(),
+                value.toString(),
+            },
         );
-
-        return array;
     }
 };
 pub const Element = struct {
@@ -1661,19 +1673,12 @@ pub const Element = struct {
 
         var slice = name.toSlice(bun.default_allocator);
         defer slice.deinit();
-        var attr = this.element.?.getAttribute(slice.slice()).slice();
+        var attr = this.element.?.getAttribute(slice.slice());
 
         if (attr.len == 0)
             return JSC.JSValue.jsNull();
 
-        var str = ZigString.init(
-            attr,
-        );
-
-        return str.toExternalValueWithCallback(
-            globalObject,
-            free_html_writer_string,
-        );
+        return attr.toJS(globalObject);
     }
 
     /// Returns a boolean indicating whether an attribute exists on the element.
@@ -1848,8 +1853,9 @@ pub const Element = struct {
     pub fn getNamespaceURI(this: *Element, globalObject: *JSGlobalObject) JSValue {
         if (this.element == null)
             return JSValue.jsUndefined();
-
-        return ZigString.init(std.mem.span(this.element.?.namespaceURI())).toValueGC(globalObject);
+        var str = bun.String.create(std.mem.span(this.element.?.namespaceURI()));
+        defer str.deref();
+        return str.toJS(globalObject);
     }
 
     pub fn getAttributes(this: *Element, globalObject: *JSGlobalObject) JSValue {
@@ -1868,7 +1874,7 @@ pub const Element = struct {
                 AttributeIterator.getAttributeIteratorJSClass(globalObject).asObjectRef(),
                 null,
                 1,
-                @ptrCast([*]JSC.C.JSObjectRef, &attr),
+                @as([*]JSC.C.JSObjectRef, @ptrCast(&attr)),
                 null,
             ),
         );

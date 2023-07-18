@@ -11,6 +11,7 @@
 #include "JavaScriptCore/ObjectConstructor.h"
 #include "JavaScriptCore/GeneratorFunctionPrototype.h"
 #include "JavaScriptCore/AsyncFunctionPrototype.h"
+#include "JavaScriptCore/ErrorPrototype.h"
 
 using namespace JSC;
 
@@ -84,7 +85,37 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionIsSymbolObject, (JSC::JSGlobalObject * global
 JSC_DEFINE_HOST_FUNCTION(jsFunctionIsNativeError, (JSC::JSGlobalObject * globalObject, JSC::CallFrame* callframe))
 {
     GET_FIRST_VALUE
-    return JSValue::encode(jsBoolean(value.isCell() && jsDynamicCast<ErrorInstance*>(value) != nullptr));
+    if (value.isCell()) {
+        if (value.inherits<JSC::ErrorInstance>() || value.asCell()->type() == ErrorInstanceType)
+            return JSValue::encode(jsBoolean(true));
+
+        VM& vm = globalObject->vm();
+        auto scope = DECLARE_THROW_SCOPE(vm);
+        JSObject* object = value.toObject(globalObject);
+
+        // node util.isError relies on toString
+        // https://github.com/nodejs/node/blob/cf8c6994e0f764af02da4fa70bc5962142181bf3/doc/api/util.md#L2923
+        PropertySlot slot(object, PropertySlot::InternalMethodType::VMInquiry, &vm);
+        if (object->getPropertySlot(globalObject, vm.propertyNames->toStringTagSymbol, slot)) {
+            EXCEPTION_ASSERT(!scope.exception());
+            if (slot.isValue()) {
+                JSValue value = slot.getValue(globalObject, vm.propertyNames->toStringTagSymbol);
+                if (value.isString()) {
+                    String tag = asString(value)->value(globalObject);
+                    if (UNLIKELY(scope.exception()))
+                        scope.clearException();
+                    if (tag == "Error"_s)
+                        return JSValue::encode(jsBoolean(true));
+                }
+            }
+        }
+
+        JSValue proto = object->getPrototype(vm, globalObject);
+        if (proto.isCell() && (proto.inherits<JSC::ErrorInstance>() || proto.asCell()->type() == ErrorInstanceType || proto.inherits<JSC::ErrorPrototype>()))
+            return JSValue::encode(jsBoolean(true));
+    }
+
+    return JSValue::encode(jsBoolean(false));
 }
 JSC_DEFINE_HOST_FUNCTION(jsFunctionIsRegExp, (JSC::JSGlobalObject * globalObject, JSC::CallFrame* callframe))
 {
@@ -171,7 +202,7 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionIsSharedArrayBuffer, (JSC::JSGlobalObject * g
 JSC_DEFINE_HOST_FUNCTION(jsFunctionIsProxy, (JSC::JSGlobalObject * globalObject, JSC::CallFrame* callframe))
 {
     GET_FIRST_CELL
-    return JSValue::encode(jsBoolean(cell->type() == PureForwardingProxyType || cell->type() == ProxyObjectType));
+    return JSValue::encode(jsBoolean(cell->type() == GlobalProxyType || cell->type() == ProxyObjectType));
 }
 JSC_DEFINE_HOST_FUNCTION(jsFunctionIsModuleNamespaceObject, (JSC::JSGlobalObject * globalObject, JSC::CallFrame* callframe))
 {
@@ -291,7 +322,7 @@ void generateNodeUtilTypesSourceCode(JSC::JSGlobalObject* lexicalGlobalObject,
 
     JSC::VM& vm = globalObject->vm();
 
-    JSC::JSObject* defaultObject = constructEmptyObject(globalObject, globalObject->objectPrototype(), 43);
+    JSC::JSObject* defaultObject = constructEmptyObject(globalObject, globalObject->objectPrototype(), 42);
     exportNames.reserveCapacity(43);
     exportValues.ensureCapacity(43);
 

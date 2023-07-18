@@ -30,6 +30,16 @@ public:
     std::unique_ptr<IsoSubspace> m_subspaceForPendingVirtualModuleResult;
     std::unique_ptr<IsoSubspace> m_subspaceForCallSite;
     std::unique_ptr<IsoSubspace> m_subspaceForNapiExternal;
+    std::unique_ptr<IsoSubspace> m_subspaceForImportMeta;
+    std::unique_ptr<IsoSubspace> m_subspaceForRequireResolveFunction;
+    std::unique_ptr<IsoSubspace> m_subspaceForBundlerPlugin;
+    std::unique_ptr<IsoSubspace> m_subspaceForNodeVMScript;
+    std::unique_ptr<IsoSubspace> m_subspaceForCommonJSModuleRecord;
+    std::unique_ptr<IsoSubspace> m_subspaceForJSMockImplementation;
+    std::unique_ptr<IsoSubspace> m_subspaceForJSMockFunction;
+    std::unique_ptr<IsoSubspace> m_subspaceForMockWithImplementationCleanupData;
+    std::unique_ptr<IsoSubspace> m_subspaceForProcessObject;
+
 #include "ZigGeneratedClasses+DOMIsoSubspaces.h"
     /*-- BUN --*/
 
@@ -466,8 +476,8 @@ public:
     // std::unique_ptr<IsoSubspace> m_subspaceForFileList;
     // std::unique_ptr<IsoSubspace> m_subspaceForFileReader;
     // std::unique_ptr<IsoSubspace> m_subspaceForFileReaderSync;
-    // std::unique_ptr<IsoSubspace> m_subspaceForDOMFormData;
-    // std::unique_ptr<IsoSubspace> m_subspaceForDOMFormDataIterator;
+    std::unique_ptr<IsoSubspace> m_subspaceForDOMFormData;
+    std::unique_ptr<IsoSubspace> m_subspaceForDOMFormDataIterator;
     // std::unique_ptr<IsoSubspace> m_subspaceForDOMTokenList;
     // std::unique_ptr<IsoSubspace> m_subspaceForDOMTokenListIterator;
     // std::unique_ptr<IsoSubspace> m_subspaceForDOMURL;
@@ -842,7 +852,7 @@ public:
     // std::unique_ptr<IsoSubspace> m_subspaceForWebFakeXRInputController;
     // std::unique_ptr<IsoSubspace> m_subspaceForWebXRTest;
     // std::unique_ptr<IsoSubspace> m_subspaceForDedicatedWorkerGlobalScope;
-    // std::unique_ptr<IsoSubspace> m_subspaceForWorker;
+    std::unique_ptr<IsoSubspace> m_subspaceForWorker;
     std::unique_ptr<IsoSubspace> m_subspaceForWorkerGlobalScope;
     // std::unique_ptr<IsoSubspace> m_subspaceForWorkerLocation;
     // std::unique_ptr<IsoSubspace> m_subspaceForExtendableEvent;

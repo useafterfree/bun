@@ -1,4 +1,6 @@
-const bun = @import("bun");
+// Most of this file should eventually be replaced with `bundle_v2.zig` or
+// `bundle_v2` should be split into several files.
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -12,13 +14,13 @@ const C = bun.C;
 const Ref = @import("./ast/base.zig").Ref;
 
 const std = @import("std");
-const lex = @import("js_lexer.zig");
-const logger = @import("bun").logger;
+const lex = bun.js_lexer;
+const logger = @import("root").bun.logger;
 const Options = @import("options.zig");
-const js_parser = @import("js_parser.zig");
-const json_parser = @import("json_parser.zig");
-const js_printer = @import("js_printer.zig");
-const js_ast = @import("js_ast.zig");
+const js_parser = bun.js_parser;
+const json_parser = bun.JSON;
+const js_printer = bun.js_printer;
+const js_ast = bun.JSAst;
 
 const Fs = @import("fs.zig");
 const Api = @import("api/schema.zig").Api;
@@ -30,16 +32,16 @@ const ImportKind = _import_record.ImportKind;
 const allocators = @import("./allocators.zig");
 const MimeType = @import("./http/mime_type.zig");
 const resolve_path = @import("./resolver/resolve_path.zig");
-const _bundler = @import("./bundler.zig");
+const _bundler = bun.bundler;
 const Bundler = _bundler.Bundler;
 const ResolveQueue = _bundler.ResolveQueue;
 const ResolverType = Resolver.Resolver;
 const ESModule = @import("./resolver/package_json.zig").ESModule;
 const Runtime = @import("./runtime.zig").Runtime;
 const URL = @import("url.zig").URL;
-const JSC = @import("bun").JSC;
-const PluginRunner = @import("./bundler.zig").PluginRunner;
-pub const CSSResolveError = error{ResolveError};
+const JSC = @import("root").bun.JSC;
+const PluginRunner = bun.bundler.PluginRunner;
+pub const CSSResolveError = error{ResolveMessage};
 
 pub const OnImportCallback = *const fn (resolve_result: *const Resolver.Result, import_record: *ImportRecord, origin: URL) void;
 
@@ -117,7 +119,7 @@ pub const Linker = struct {
         fd: ?FileDescriptorType,
     ) !string {
         if (Bundler.isCacheEnabled) {
-            var hashed = std.hash.Wyhash.hash(0, file_path.text);
+            var hashed = bun.hash(file_path.text);
             var hashed_result = try this.hashed_filenames.getOrPut(hashed);
             if (hashed_result.found_existing) {
                 return hashed_result.value_ptr.*;
@@ -128,7 +130,7 @@ pub const Linker = struct {
         const hash_name = modkey.hashName(file_path.text);
 
         if (Bundler.isCacheEnabled) {
-            var hashed = std.hash.Wyhash.hash(0, file_path.text);
+            var hashed = bun.hash(file_path.text);
             try this.hashed_filenames.put(hashed, try this.allocator.dupe(u8, hash_name));
         }
 
@@ -172,7 +174,7 @@ pub const Linker = struct {
     }
 
     pub inline fn nodeModuleBundleImportPath(this: *const ThisLinker, origin: URL) string {
-        if (this.options.platform.isBun()) return "/node_modules.server.bun";
+        if (this.options.target.isBun()) return "/node_modules.server.bun";
 
         return std.fmt.allocPrint(this.allocator, "{s}://{}{s}", .{ origin.displayProtocol(), origin.displayHost(), this.options.node_modules_bundle.?.bundle.import_from_name }) catch unreachable;
     }
@@ -219,22 +221,23 @@ pub const Linker = struct {
         var needs_bundle = false;
         var had_resolve_errors = false;
         var needs_require = false;
+        _ = needs_require;
         var node_module_bundle_import_path: ?string = null;
 
         const is_deferred = result.pending_imports.len > 0;
 
-        var import_records = result.ast.import_records;
+        var import_records = result.ast.import_records.listManaged(linker.allocator);
         defer {
-            result.ast.import_records = import_records;
+            result.ast.import_records = ImportRecord.List.fromList(import_records);
         }
         // Step 1. Resolve imports & requires
         switch (result.loader) {
             .jsx, .js, .ts, .tsx => {
                 var record_i: u32 = 0;
-                const record_count = @truncate(u32, import_records.len);
+                const record_count = @as(u32, @truncate(import_records.items.len));
 
                 outer: while (record_i < record_count) : (record_i += 1) {
-                    var import_record = &import_records[record_i];
+                    var import_record = &import_records.items[record_i];
                     if (import_record.is_unused or
                         (is_bun and is_deferred and !result.isPendingImport(record_i))) continue;
 
@@ -270,10 +273,12 @@ pub const Linker = struct {
 
                     if (comptime is_bun) {
                         if (JSC.HardcodedModule.Aliases.get(import_record.path.text)) |replacement| {
-                            import_record.path.text = replacement;
-                            import_record.tag = if (strings.eqlComptime(replacement, "bun")) ImportRecord.Tag.bun else .hardcoded;
-                            externals.append(record_index) catch unreachable;
-                            continue;
+                            import_record.path.text = replacement.path;
+                            import_record.tag = replacement.tag;
+                            if (replacement.tag != .none) {
+                                externals.append(record_index) catch unreachable;
+                                continue;
+                            }
                         }
 
                         if (JSC.DisabledModule.has(import_record.path.text)) {
@@ -304,7 +309,7 @@ pub const Linker = struct {
                             }
                         }
 
-                        if (import_record.path.text.len > 4 and strings.eqlComptimeIgnoreLen(import_record.path.text[0.."bun:".len], "bun:")) {
+                        if (strings.hasPrefixComptime(import_record.path.text, "bun:")) {
                             import_record.path = Fs.Path.init(import_record.path.text["bun:".len..]);
                             import_record.path.namespace = "bun";
 
@@ -331,7 +336,7 @@ pub const Linker = struct {
                                 import_record.range.loc,
                                 if (is_bun)
                                     JSC.JSGlobalObject.BunPluginTarget.bun
-                                else if (linker.options.platform == .browser)
+                                else if (linker.options.target == .browser)
                                     JSC.JSGlobalObject.BunPluginTarget.browser
                                 else
                                     JSC.JSGlobalObject.BunPluginTarget.node,
@@ -371,7 +376,6 @@ pub const Linker = struct {
                                     if (node_modules_bundle.getPackage(package_name)) |pkg| {
                                         const import_path = text[@min(text.len, package_name.len + 1)..];
                                         if (node_modules_bundle.findModuleIDInPackageIgnoringExtension(pkg, import_path)) |found_module| {
-                                            import_record.is_bundled = true;
                                             node_module_bundle_import_path = node_module_bundle_import_path orelse
                                                 linker.nodeModuleBundleImportPath(origin);
 
@@ -399,7 +403,6 @@ pub const Linker = struct {
                                         if (node_modules_bundle.getPackage(package_name)) |pkg| {
                                             const import_path = runtime[@min(runtime.len, package_name.len + 1)..];
                                             if (node_modules_bundle.findModuleInPackage(pkg, import_path)) |found_module| {
-                                                import_record.is_bundled = true;
                                                 node_module_bundle_import_path = node_module_bundle_import_path orelse
                                                     linker.nodeModuleBundleImportPath(origin);
 
@@ -475,8 +478,9 @@ pub const Linker = struct {
                     };
 
                     if (resolved_import_) |*resolved_import| {
-                        if (resolved_import.is_external) {
-                            externals.append(record_index) catch unreachable;
+                        if (resolved_import.is_external or resolved_import.is_standalone_module) {
+                            if (resolved_import.is_external)
+                                externals.append(record_index) catch unreachable;
                             continue;
                         }
 
@@ -529,7 +533,6 @@ pub const Linker = struct {
                                                 );
                                             }
 
-                                            import_record.is_bundled = true;
                                             node_module_bundle_import_path = node_module_bundle_import_path orelse
                                                 linker.nodeModuleBundleImportPath(origin);
                                             import_record.path.text = node_module_bundle_import_path.?;
@@ -564,11 +567,9 @@ pub const Linker = struct {
                         // If it's a namespace import, assume it's safe.
                         // We can do this in the printer instead of creating a bunch of AST nodes here.
                         // But we need to at least tell the printer that this needs to happen.
-                        if (loader != .napi and resolved_import.shouldAssumeCommonJS(import_record.kind)) {
+                        if (loader != .napi and resolved_import.shouldAssumeCommonJS(import_record.kind) and !is_bun) {
                             import_record.do_commonjs_transform_in_printer = true;
-                            import_record.module_id = @truncate(u32, std.hash.Wyhash.hash(0, path.pretty));
-                            result.ast.needs_runtime = true;
-                            needs_require = true;
+                            import_record.module_id = @as(u32, @truncate(bun.hash(path.pretty)));
                         }
                     } else |err| {
                         switch (err) {
@@ -733,12 +734,12 @@ pub const Linker = struct {
                                 had_resolve_errors = true;
 
                                 if (import_record.path.text.len > 0 and Resolver.isPackagePath(import_record.path.text)) {
-                                    if (linker.options.platform.isWebLike() and Options.ExternalModules.isNodeBuiltin(import_record.path.text)) {
+                                    if (linker.options.target.isWebLike() and Options.ExternalModules.isNodeBuiltin(import_record.path.text)) {
                                         try linker.log.addResolveError(
                                             &result.source,
                                             import_record.range,
                                             linker.allocator,
-                                            "Could not resolve: \"{s}\". Try setting --platform=\"node\" (after bun build exists)",
+                                            "Could not resolve: \"{s}\". Try setting --target=\"node\"",
                                             .{import_record.path.text},
                                             import_record.kind,
                                             err,
@@ -795,69 +796,70 @@ pub const Linker = struct {
 
             else => {},
         }
-        if (had_resolve_errors) return error.ResolveError;
+        if (had_resolve_errors) return error.ResolveMessage;
         result.ast.externals = try externals.toOwnedSlice();
 
-        if (result.ast.needs_runtime and (result.ast.runtime_import_record_id == null or import_records.len == 0)) {
-            var new_import_records = try linker.allocator.alloc(ImportRecord, import_records.len + 1);
-            std.mem.copy(ImportRecord, new_import_records, import_records);
+        //     if (result.ast.needs_runtime and (result.ast.runtime_import_record_id == null or import_records.items.len == 0)) {
+        //         var new_import_records = try linker.allocator.alloc(ImportRecord, import_records.items.len + 1);
+        //         bun.copy(ImportRecord, new_import_records, import_records.items);
 
-            new_import_records[new_import_records.len - 1] = ImportRecord{
-                .kind = .stmt,
-                .path = if (linker.options.node_modules_bundle != null)
-                    Fs.Path.init(node_module_bundle_import_path orelse linker.nodeModuleBundleImportPath(origin))
-                else if (import_path_format == .absolute_url)
-                    Fs.Path.initWithNamespace(try origin.joinAlloc(linker.allocator, "", "", "bun:wrap", "", ""), "bun")
-                else
-                    try linker.generateImportPath(source_dir, Linker.runtime_source_path, false, "bun", origin, import_path_format),
+        //         new_import_records[new_import_records.len - 1] = ImportRecord{
+        //             .kind = .stmt,
+        //             .path = if (linker.options.node_modules_bundle != null)
+        //                 Fs.Path.init(node_module_bundle_import_path orelse linker.nodeModuleBundleImportPath(origin))
+        //             else if (import_path_format == .absolute_url)
+        //                 Fs.Path.initWithNamespace(try origin.joinAlloc(linker.allocator, "", "", "bun:wrap", "", ""), "bun")
+        //             else
+        //                 try linker.generateImportPath(source_dir, Linker.runtime_source_path, false, "bun", origin, import_path_format),
 
-                .range = logger.Range{ .loc = logger.Loc{ .start = 0 }, .len = 0 },
-            };
-            result.ast.runtime_import_record_id = @truncate(u32, new_import_records.len - 1);
-            import_records = new_import_records;
-        }
+        //             .range = logger.Range{ .loc = logger.Loc{ .start = 0 }, .len = 0 },
+        //         };
+        //         result.ast.runtime_import_record_id = @truncate(u32, import_records.items.len - 1);
+        //         import_records.items = new_import_records;
+        //         import_records.capacity = new_import_records.len;
+        //     }
 
-        // We _assume_ you're importing ESM.
-        // But, that assumption can be wrong without parsing code of the imports.
-        // That's where in here, we inject
-        // > import {require} from 'bun:wrap';
-        // Since they definitely aren't using require, we don't have to worry about the symbol being renamed.
-        if (needs_require and !result.ast.uses_require_ref) {
-            result.ast.uses_require_ref = true;
-            const PrependPart = struct {
-                stmts: [1]js_ast.Stmt,
-                import_statement: js_ast.S.Import,
-                clause_items: [1]js_ast.ClauseItem,
-            };
-            var prepend = linker.allocator.create(PrependPart) catch unreachable;
+        //     // We _assume_ you're importing ESM.
+        //     // But, that assumption can be wrong without parsing code of the imports.
+        //     // That's where in here, we inject
+        //     // > import {require} from 'bun:wrap';
+        //     // Since they definitely aren't using require, we don't have to worry about the symbol being renamed.
+        //     if (needs_require and !result.ast.uses_require_ref) {
+        //         result.ast.uses_require_ref = true;
+        //         const PrependPart = struct {
+        //             stmts: [1]js_ast.Stmt,
+        //             import_statement: js_ast.S.Import,
+        //             clause_items: [1]js_ast.ClauseItem,
+        //         };
+        //         var prepend = linker.allocator.create(PrependPart) catch unreachable;
 
-            prepend.* = .{
-                .clause_items = .{
-                    .{
-                        .alias = require_alias,
-                        .original_name = "",
-                        .alias_loc = logger.Loc.Empty,
-                        .name = js_ast.LocRef{
-                            .loc = logger.Loc.Empty,
-                            .ref = result.ast.require_ref,
-                        },
-                    },
-                },
-                .import_statement = .{
-                    .namespace_ref = Ref.None,
-                    .items = &prepend.clause_items,
-                    .import_record_index = result.ast.runtime_import_record_id.?,
-                },
-                .stmts = undefined,
-            };
+        //         prepend.* = .{
+        //             .clause_items = .{
+        //                 .{
+        //                     .alias = require_alias,
+        //                     .original_name = "",
+        //                     .alias_loc = logger.Loc.Empty,
+        //                     .name = js_ast.LocRef{
+        //                         .loc = logger.Loc.Empty,
+        //                         .ref = result.ast.require_ref,
+        //                     },
+        //                 },
+        //             },
+        //             .import_statement = .{
+        //                 .namespace_ref = Ref.None,
+        //                 .items = &prepend.clause_items,
+        //                 .import_record_index = result.ast.runtime_import_record_id.?,
+        //             },
+        //             .stmts = undefined,
+        //         };
 
-            prepend.stmts[0] = .{
-                .data = .{ .s_import = &prepend.import_statement },
-                .loc = logger.Loc.Empty,
-            };
+        //         prepend.stmts[0] = .{
+        //             .data = .{ .s_import = &prepend.import_statement },
+        //             .loc = logger.Loc.Empty,
+        //         };
 
-            result.ast.prepend_part = js_ast.Part{ .stmts = &prepend.stmts };
-        }
+        //         result.ast.prepend_part = js_ast.Part{ .stmts = &prepend.stmts };
+        //     }
     }
 
     const ImportPathsList = allocators.BSSStringList(512, 128);
@@ -894,15 +896,20 @@ pub const Linker = struct {
                     const basename = try linker.getHashedFilename(basepath, null);
                     var dir = basepath.name.dirWithTrailingSlash();
                     var _pretty = try linker.allocator.alloc(u8, dir.len + basename.len + basepath.name.ext.len);
-                    std.mem.copy(u8, _pretty, dir);
+                    bun.copy(u8, _pretty, dir);
                     var remaining_pretty = _pretty[dir.len..];
-                    std.mem.copy(u8, remaining_pretty, basename);
+                    bun.copy(u8, remaining_pretty, basename);
                     remaining_pretty = remaining_pretty[basename.len..];
-                    std.mem.copy(u8, remaining_pretty, basepath.name.ext);
+                    bun.copy(u8, remaining_pretty, basepath.name.ext);
                     pretty = _pretty;
                     relative_name = try linker.allocator.dupe(u8, relative_name);
                 } else {
-                    pretty = try linker.allocator.dupe(u8, relative_name);
+                    if (relative_name.len > 1 and !(relative_name[0] == std.fs.path.sep or relative_name[0] == '.')) {
+                        pretty = try strings.concat(linker.allocator, &.{ "./", relative_name });
+                    } else {
+                        pretty = try linker.allocator.dupe(u8, relative_name);
+                    }
+
                     relative_name = pretty;
                 }
 
@@ -984,17 +991,12 @@ pub const Linker = struct {
         comptime import_path_format: Options.BundleOptions.ImportPathFormat,
     ) !void {
         linker.import_counter += 1;
-        // lazy means:
-        // Run the resolver
-        // Don't parse/print automatically.
-        if (linker.options.resolve_mode != .lazy) {
-            _ = try linker.enqueueResolveResult(resolve_result);
-        }
+
         const path = resolve_result.pathConst() orelse unreachable;
 
         import_record.path = try linker.generateImportPath(
             source_dir,
-            if (path.is_symlink and import_path_format == .absolute_url and linker.options.platform.isNotBun()) path.pretty else path.text,
+            if (path.is_symlink and import_path_format == .absolute_url and linker.options.target.isNotBun()) path.pretty else path.text,
             loader == .file or loader == .wasm,
             path.namespace,
             origin,
@@ -1003,6 +1005,9 @@ pub const Linker = struct {
 
         switch (loader) {
             .css => {
+                if (!linker.options.target.isBun())
+                    _ = try linker.enqueueResolveResult(resolve_result);
+
                 if (linker.onImportCSS) |callback| {
                     callback(resolve_result, import_record, origin);
                 }
@@ -1012,17 +1017,15 @@ pub const Linker = struct {
             .napi => {
                 import_record.print_mode = .napi_module;
             },
-            .wasm => {
-                import_record.print_mode = .import_path;
-            },
-            .file => {
+
+            .wasm, .file => {
 
                 // if we're building for web/node, always print as import path
                 // if we're building for bun
                 // it's more complicated
                 // loader plugins could be executed between when this is called and the import is evaluated
                 // but we want to preserve the semantics of "file" returning import paths for compatibiltiy with frontend frameworkss
-                if (!linker.options.platform.isBun()) {
+                if (!linker.options.target.isBun()) {
                     import_record.print_mode = .import_path;
                 }
             },
@@ -1040,7 +1043,7 @@ pub const Linker = struct {
             hash_key = path.text[linker.fs.top_level_dir.len..];
         }
 
-        return std.hash.Wyhash.hash(0, hash_key);
+        return bun.hash(hash_key);
     }
 
     pub fn enqueueResolveResult(linker: *ThisLinker, resolve_result: *const Resolver.Result) !bool {

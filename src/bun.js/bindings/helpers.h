@@ -2,16 +2,22 @@
 
 #include "root.h"
 
-#include "headers.h"
+#include <JavaScriptCore/Error.h>
+#include <JavaScriptCore/Exception.h>
+#include <JavaScriptCore/Identifier.h>
+#include <JavaScriptCore/JSGlobalObject.h>
+#include <JavaScriptCore/JSString.h>
+#include <JavaScriptCore/JSValueInternal.h>
+#include <JavaScriptCore/ThrowScope.h>
+#include <JavaScriptCore/VM.h>
 
-#include "JavaScriptCore/Error.h"
-#include "JavaScriptCore/Exception.h"
-#include "JavaScriptCore/Identifier.h"
-#include "JavaScriptCore/JSGlobalObject.h"
-#include "JavaScriptCore/JSString.h"
-#include "JavaScriptCore/JSValueInternal.h"
-#include "JavaScriptCore/ThrowScope.h"
-#include "JavaScriptCore/VM.h"
+using JSC__JSGlobalObject = JSC::JSGlobalObject;
+using JSC__JSValue = JSC::EncodedJSValue;
+using JSC__CallFrame = JSC::CallFrame;
+namespace Zig {
+}
+
+#include "headers-handwritten.h"
 
 template<class CppType, typename ZigType> class Wrap {
 public:
@@ -78,7 +84,7 @@ namespace Zig {
 static const unsigned char* untag(const unsigned char* ptr)
 {
     return reinterpret_cast<const unsigned char*>(
-        ((reinterpret_cast<uintptr_t>(ptr) & ~(static_cast<uint64_t>(1) << 63) & ~(static_cast<uint64_t>(1) << 62)) & ~(static_cast<uint64_t>(1) << 61)));
+        (((reinterpret_cast<uintptr_t>(ptr) & ~(static_cast<uint64_t>(1) << 63) & ~(static_cast<uint64_t>(1) << 62)) & ~(static_cast<uint64_t>(1) << 61)) & ~(static_cast<uint64_t>(1) << 60)));
 }
 
 static void* untagVoid(const unsigned char* ptr)
@@ -239,6 +245,8 @@ static const JSC::JSValue toJSStringValueGC(ZigString str, JSC::JSGlobalObject* 
 static const ZigString ZigStringEmpty = ZigString { nullptr, 0 };
 static const unsigned char __dot_char = '.';
 static const ZigString ZigStringCwd = ZigString { &__dot_char, 1 };
+static const BunString BunStringCwd = BunString { BunStringTag::StaticZigString, ZigStringCwd };
+static const BunString BunStringEmpty = BunString { BunStringTag::Empty, nullptr };
 
 static const unsigned char* taggedUTF16Ptr(const UChar* ptr)
 {
@@ -324,6 +332,23 @@ static ZigString toZigString(JSC::JSValue val, JSC::JSGlobalObject* global)
     return toZigString(str);
 }
 
+static const WTF::String toStringStatic(ZigString str)
+{
+    if (str.len == 0 || str.ptr == nullptr) {
+        return WTF::String();
+    }
+    if (UNLIKELY(isTaggedUTF8Ptr(str.ptr))) {
+        abort();
+    }
+
+    if (isTaggedUTF16Ptr(str.ptr)) {
+        return WTF::String(AtomStringImpl::add(reinterpret_cast<const UChar*>(untag(str.ptr)), str.len));
+    }
+
+    return WTF::String(AtomStringImpl::add(
+        reinterpret_cast<const LChar*>(untag(str.ptr)), str.len));
+}
+
 static JSC::JSValue getErrorInstance(const ZigString* str, JSC__JSGlobalObject* globalObject)
 {
     JSC::VM& vm = globalObject->vm();
@@ -334,7 +359,50 @@ static JSC::JSValue getErrorInstance(const ZigString* str, JSC__JSGlobalObject* 
     return JSC::JSValue(result);
 }
 
+static JSC::JSValue getTypeErrorInstance(const ZigString* str, JSC__JSGlobalObject* globalObject)
+{
+    JSC::VM& vm = globalObject->vm();
+
+    JSC::JSObject* result = JSC::createTypeError(globalObject, toStringCopy(*str));
+    JSC::EnsureStillAliveScope ensureAlive(result);
+
+    return JSC::JSValue(result);
+}
+
+static JSC::JSValue getSyntaxErrorInstance(const ZigString* str, JSC__JSGlobalObject* globalObject)
+{
+    JSC::VM& vm = globalObject->vm();
+
+    JSC::JSObject* result = JSC::createSyntaxError(globalObject, toStringCopy(*str));
+    JSC::EnsureStillAliveScope ensureAlive(result);
+
+    return JSC::JSValue(result);
+}
+
+static JSC::JSValue getRangeErrorInstance(const ZigString* str, JSC__JSGlobalObject* globalObject)
+{
+    JSC::VM& vm = globalObject->vm();
+
+    JSC::JSObject* result = JSC::createRangeError(globalObject, toStringCopy(*str));
+    JSC::EnsureStillAliveScope ensureAlive(result);
+
+    return JSC::JSValue(result);
+}
+
 }; // namespace Zig
+
+JSC::JSValue createSystemError(JSC::JSGlobalObject* global, ASCIILiteral message, ASCIILiteral syscall, int err);
+JSC::JSValue createSystemError(JSC::JSGlobalObject* global, ASCIILiteral syscall, int err);
+
+static void throwSystemError(JSC::ThrowScope& scope, JSC::JSGlobalObject* globalObject, ASCIILiteral syscall, int err)
+{
+    scope.throwException(globalObject, createSystemError(globalObject, syscall, err));
+}
+
+static void throwSystemError(JSC::ThrowScope& scope, JSC::JSGlobalObject* globalObject, ASCIILiteral message, ASCIILiteral syscall, int err)
+{
+    scope.throwException(globalObject, createSystemError(globalObject, message, syscall, err));
+}
 
 template<typename WebCoreType, typename OutType>
 OutType* WebCoreCast(JSC__JSValue JSValue0)

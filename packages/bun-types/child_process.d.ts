@@ -66,7 +66,7 @@
  * @see [source](https://github.com/nodejs/node/blob/v18.0.0/lib/child_process.js)
  */
 declare module "child_process" {
-  import { SpawnOptions } from "bun";
+  import { SpawnOptions, ArrayBufferView } from "bun";
   import { ObjectEncodingOptions } from "node:fs";
   import { EventEmitter, Abortable } from "node:events";
 
@@ -704,7 +704,7 @@ declare module "child_process" {
     uid?: number | undefined;
     gid?: number | undefined;
     cwd?: string | URL | undefined;
-    env?: Partial<Bun.Env> | undefined;
+    env?: Partial<import("bun").Env> | undefined;
   }
   interface CommonOptions extends ProcessEnvOptions {
     /**

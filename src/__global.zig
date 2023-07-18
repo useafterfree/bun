@@ -2,11 +2,12 @@ const std = @import("std");
 const Environment = @import("./env.zig");
 
 const Output = @import("output.zig");
-const use_mimalloc = @import("bun").use_mimalloc;
+const use_mimalloc = @import("root").bun.use_mimalloc;
 const StringTypes = @import("./string_types.zig");
-const Mimalloc = @import("bun").Mimalloc;
+const Mimalloc = @import("root").bun.Mimalloc;
+const bun = @import("root").bun;
 
-const BASE_VERSION = "0.4";
+const BASE_VERSION = "0.6";
 
 pub const build_id = std.fmt.parseInt(u64, std.mem.trim(u8, @embedFile("./build-id"), "\n \r\t"), 10) catch unreachable;
 pub const package_json_version = if (Environment.isDebug)
@@ -43,23 +44,24 @@ else
 
 pub inline fn getStartTime() i128 {
     if (Environment.isTest) return 0;
-    return @import("bun").start_time;
+    return @import("root").bun.start_time;
 }
 
 pub const version: @import("./install/semver.zig").Version = .{
     .major = 0,
-    .minor = 4,
+    .minor = 6,
     .patch = build_id,
 };
 
 pub fn setThreadName(name: StringTypes.stringZ) void {
     if (Environment.isLinux) {
-        _ = std.os.prctl(.SET_NAME, .{@ptrToInt(name.ptr)}) catch 0;
+        _ = std.os.prctl(.SET_NAME, .{@intFromPtr(name.ptr)}) catch 0;
     } else if (Environment.isMac) {
         _ = std.c.pthread_setname_np(name);
     }
 }
 
+/// Flushes stdout and stderr and exits with the given code.
 pub fn exit(code: u8) noreturn {
     Output.flush();
     std.os.exit(code);
@@ -134,7 +136,7 @@ pub fn crash() noreturn {
 }
 
 const Global = @This();
-const string = @import("bun").string;
+const string = @import("root").bun.string;
 
 pub const BunInfo = struct {
     bun_version: string,
@@ -143,8 +145,8 @@ pub const BunInfo = struct {
     framework_version: string = "",
 
     const Analytics = @import("./analytics/analytics_thread.zig");
-    const JSON = @import("./json_parser.zig");
-    const JSAst = @import("./js_ast.zig");
+    const JSON = bun.JSON;
+    const JSAst = bun.JSAst;
     pub fn generate(comptime Bundler: type, bundler: Bundler, allocator: std.mem.Allocator) !JSAst.Expr {
         var info = BunInfo{
             .bun_version = Global.package_json_version,

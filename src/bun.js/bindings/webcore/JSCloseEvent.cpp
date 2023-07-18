@@ -99,7 +99,7 @@ template<> CloseEvent::Init convertDictionary<CloseEvent::Init>(JSGlobalObject& 
     if (isNullOrUndefined)
         codeValue = jsUndefined();
     else {
-        codeValue = object->get(&lexicalGlobalObject, Identifier::fromString(vm, "code"_s));
+        codeValue = object->get(&lexicalGlobalObject, WebCore::builtinNames(vm).codePublicName());
         RETURN_IF_EXCEPTION(throwScope, {});
     }
     if (!codeValue.isUndefined()) {
@@ -320,9 +320,9 @@ JSC::GCClient::IsoSubspace* JSCloseEvent::subspaceForImpl(JSC::VM& vm)
     return WebCore::subspaceForImpl<JSCloseEvent, UseCustomHeapCellType::No>(
         vm,
         [](auto& spaces) { return spaces.m_clientSubspaceForCloseEvent.get(); },
-        [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForCloseEvent = WTFMove(space); },
+        [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForCloseEvent = std::forward<decltype(space)>(space); },
         [](auto& spaces) { return spaces.m_subspaceForCloseEvent.get(); },
-        [](auto& spaces, auto&& space) { spaces.m_subspaceForCloseEvent = WTFMove(space); });
+        [](auto& spaces, auto&& space) { spaces.m_subspaceForCloseEvent = std::forward<decltype(space)>(space); });
 }
 
 void JSCloseEvent::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)

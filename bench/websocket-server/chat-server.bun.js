@@ -32,15 +32,14 @@ const server = Bun.serve({
     },
 
     perMessageDeflate: false,
+    publishToSelf: true,
   },
 
   fetch(req, server) {
     if (
       server.upgrade(req, {
         data: {
-          name:
-            new URL(req.url).searchParams.get("name") ||
-            "Client #" + (CLIENTS_TO_WAIT_FOR - remainingClients),
+          name: new URL(req.url).searchParams.get("name") || "Client #" + (CLIENTS_TO_WAIT_FOR - remainingClients),
         },
       })
     )
@@ -50,7 +49,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(
-  `Waiting for ${remainingClients} clients to connect...\n`,
-  `  http://${server.hostname}:${port}/`
-);
+console.log(`Waiting for ${remainingClients} clients to connect...\n`, `  http://${server.hostname}:${port}/`);

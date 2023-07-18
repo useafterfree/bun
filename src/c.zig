@@ -1,5 +1,5 @@
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const Environment = @import("./env.zig");
 
 const PlatformSpecific = switch (@import("builtin").target.os.tag) {
@@ -38,9 +38,14 @@ pub extern "c" fn truncate([*:0]const u8, i64) c_int; // note: truncate64 is not
 pub extern "c" fn lutimes(path: [*:0]const u8, times: *const [2]std.os.timeval) c_int;
 pub extern "c" fn mkdtemp(template: [*c]u8) ?[*:0]u8;
 
+pub extern "c" fn memcmp(s1: [*c]const u8, s2: [*c]const u8, n: usize) c_int;
+pub extern "c" fn memchr(s: [*]const u8, c: u8, n: usize) ?[*]const u8;
+
 pub const lstat = lstat64;
 pub const fstat = fstat64;
 pub const stat = stat64;
+
+pub extern "c" fn strchr(str: [*]const u8, char: u8) ?[*]const u8;
 
 pub fn lstat_absolute(path: [:0]const u8) !Stat {
     if (builtin.os.tag == .windows) {
@@ -63,27 +68,27 @@ pub fn lstat_absolute(path: [:0]const u8) !Stat {
     const ctime = st.ctime();
     return Stat{
         .inode = st.ino,
-        .size = @bitCast(u64, st.size),
+        .size = @as(u64, @bitCast(st.size)),
         .mode = st.mode,
         .kind = switch (builtin.os.tag) {
             .wasi => switch (st.filetype) {
-                os.FILETYPE_BLOCK_DEVICE => Kind.BlockDevice,
-                os.FILETYPE_CHARACTER_DEVICE => Kind.CharacterDevice,
-                os.FILETYPE_DIRECTORY => Kind.Directory,
-                os.FILETYPE_SYMBOLIC_LINK => Kind.SymLink,
-                os.FILETYPE_REGULAR_FILE => Kind.File,
-                os.FILETYPE_SOCKET_STREAM, os.FILETYPE_SOCKET_DGRAM => Kind.UnixDomainSocket,
-                else => Kind.Unknown,
+                os.FILETYPE_BLOCK_DEVICE => Kind.block_device,
+                os.FILETYPE_CHARACTER_DEVICE => Kind.character_device,
+                os.FILETYPE_DIRECTORY => Kind.directory,
+                os.FILETYPE_SYMBOLIC_LINK => Kind.sym_link,
+                os.FILETYPE_REGULAR_FILE => Kind.file,
+                os.FILETYPE_SOCKET_STREAM, os.FILETYPE_SOCKET_DGRAM => Kind.unix_domain_socket,
+                else => Kind.unknown,
             },
             else => switch (st.mode & os.S.IFMT) {
-                os.S.IFBLK => Kind.BlockDevice,
-                os.S.IFCHR => Kind.CharacterDevice,
-                os.S.IFDIR => Kind.Directory,
-                os.S.IFIFO => Kind.NamedPipe,
-                os.S.IFLNK => Kind.SymLink,
-                os.S.IFREG => Kind.File,
-                os.S.IFSOCK => Kind.UnixDomainSocket,
-                else => Kind.Unknown,
+                os.S.IFBLK => Kind.block_device,
+                os.S.IFCHR => Kind.character_device,
+                os.S.IFDIR => Kind.directory,
+                os.S.IFIFO => Kind.named_pipe,
+                os.S.IFLNK => Kind.sym_link,
+                os.S.IFREG => Kind.file,
+                os.S.IFSOCK => Kind.unix_domain_socket,
+                else => Kind.unknown,
             },
         },
         .atime = @as(i128, atime.tv_sec) * std.time.ns_per_s + atime.tv_nsec,
@@ -137,16 +142,16 @@ pub fn moveFileZSlowWithHandle(in_handle: std.os.fd_t, to_dir: std.os.fd_t, dest
     const out_handle = try std.os.openatZ(to_dir, destination, std.os.O.WRONLY | std.os.O.CREAT | std.os.O.CLOEXEC, 0o022);
     defer std.os.close(out_handle);
     if (comptime Environment.isLinux) {
-        _ = std.os.system.fallocate(out_handle, 0, 0, @intCast(i64, stat_.size));
-        _ = try std.os.sendfile(out_handle, in_handle, 0, @intCast(usize, stat_.size), &[_]std.os.iovec_const{}, &[_]std.os.iovec_const{}, 0);
+        _ = std.os.system.fallocate(out_handle, 0, 0, @as(i64, @intCast(stat_.size)));
+        _ = try std.os.sendfile(out_handle, in_handle, 0, @as(usize, @intCast(stat_.size)), &[_]std.os.iovec_const{}, &[_]std.os.iovec_const{}, 0);
     } else {
         if (comptime Environment.isMac) {
             // if this fails, it doesn't matter
             // we only really care about read & write succeeding
             PlatformSpecific.preallocate_file(
                 out_handle,
-                @intCast(std.os.off_t, 0),
-                @intCast(std.os.off_t, stat_.size),
+                @as(std.os.off_t, @intCast(0)),
+                @as(std.os.off_t, @intCast(stat_.size)),
             ) catch {};
         }
 
@@ -168,14 +173,14 @@ pub fn moveFileZSlowWithHandle(in_handle: std.os.fd_t, to_dir: std.os.fd_t, dest
 
 pub fn kindFromMode(mode: os.mode_t) std.fs.File.Kind {
     return switch (mode & os.S.IFMT) {
-        os.S.IFBLK => std.fs.File.Kind.BlockDevice,
-        os.S.IFCHR => std.fs.File.Kind.CharacterDevice,
-        os.S.IFDIR => std.fs.File.Kind.Directory,
-        os.S.IFIFO => std.fs.File.Kind.NamedPipe,
-        os.S.IFLNK => std.fs.File.Kind.SymLink,
-        os.S.IFREG => std.fs.File.Kind.File,
-        os.S.IFSOCK => std.fs.File.Kind.UnixDomainSocket,
-        else => .Unknown,
+        os.S.IFBLK => std.fs.File.Kind.block_device,
+        os.S.IFCHR => std.fs.File.Kind.character_device,
+        os.S.IFDIR => std.fs.File.Kind.directory,
+        os.S.IFIFO => std.fs.File.Kind.named_pipe,
+        os.S.IFLNK => std.fs.File.Kind.sym_link,
+        os.S.IFREG => std.fs.File.Kind.file,
+        os.S.IFSOCK => std.fs.File.Kind.unix_domain_socket,
+        else => .unknown,
     };
 }
 
@@ -345,15 +350,15 @@ pub fn getSystemLoadavg() [3]f64 {
 }
 
 pub fn getProcessPriority(pid_: i32) i32 {
-    const pid = @intCast(c_uint, pid_);
+    const pid = @as(c_uint, @intCast(pid_));
     return get_process_priority(pid);
 }
 
 pub fn setProcessPriority(pid_: i32, priority_: i32) std.c.E {
     if (pid_ < 0) return .SRCH;
 
-    const pid = @intCast(c_uint, pid_);
-    const priority = @intCast(c_int, priority_);
+    const pid = @as(c_uint, @intCast(pid_));
+    const priority = @as(c_int, @intCast(priority_));
 
     const code: i32 = set_process_priority(pid, priority);
 
@@ -393,7 +398,7 @@ const LazyStatus = enum {
     failed,
 };
 
-pub fn dlsym(comptime Type: type, comptime name: [:0]const u8) ?Type {
+pub fn dlsymWithHandle(comptime Type: type, comptime name: [:0]const u8, comptime handle_getter: fn () ?*anyopaque) ?Type {
     if (comptime @typeInfo(Type) != .Pointer) {
         @compileError("dlsym must be a pointer type (e.g. ?const *fn()). Received " ++ @typeName(Type) ++ ".");
     }
@@ -404,11 +409,7 @@ pub fn dlsym(comptime Type: type, comptime name: [:0]const u8) ?Type {
     };
 
     if (Wrapper.loaded == .pending) {
-        const RTLD_DEFAULT = if (bun.Environment.isMac)
-            @intToPtr(?*anyopaque, @bitCast(usize, @as(isize, -2)))
-        else
-            @intToPtr(?*anyopaque, @as(usize, 0));
-        const result = std.c.dlsym(RTLD_DEFAULT, name);
+        const result = std.c.dlsym(@call(.always_inline, handle_getter, .{}), name);
 
         if (result) |ptr| {
             Wrapper.function = bun.cast(Type, ptr);
@@ -427,6 +428,27 @@ pub fn dlsym(comptime Type: type, comptime name: [:0]const u8) ?Type {
     return null;
 }
 
+pub fn dlsym(comptime Type: type, comptime name: [:0]const u8) ?Type {
+    const handle_getter = struct {
+        const RTLD_DEFAULT = if (bun.Environment.isMac)
+            @as(?*anyopaque, @ptrFromInt(@as(usize, @bitCast(@as(isize, -2)))))
+        else
+            @as(?*anyopaque, @ptrFromInt(@as(usize, 0)));
+
+        pub fn getter() ?*anyopaque {
+            return RTLD_DEFAULT;
+        }
+    }.getter;
+
+    return dlsymWithHandle(Type, name, handle_getter);
+}
+
 // set in c-bindings.cpp
 pub extern fn get_process_priority(pid: c_uint) i32;
 pub extern fn set_process_priority(pid: c_uint, priority: c_int) i32;
+
+pub extern fn strncasecmp(s1: [*]const u8, s2: [*]const u8, n: usize) i32;
+pub extern fn memmove(dest: [*]u8, src: [*]const u8, n: usize) void;
+
+// https://man7.org/linux/man-pages/man3/fmod.3.html
+pub extern fn fmod(f64, f64) f64;

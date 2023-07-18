@@ -1,6 +1,6 @@
 const std = @import("std");
-const logger = @import("bun").logger;
-const bun = @import("bun");
+const logger = @import("root").bun.logger;
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -13,7 +13,7 @@ const C = bun.C;
 const CLI = @import("./cli.zig").Cli;
 const Features = @import("./analytics/analytics_thread.zig").Features;
 const Platform = @import("./analytics/analytics_thread.zig").GenerateHeader.GeneratePlatform;
-const HTTP = @import("bun").HTTP.AsyncHTTP;
+const HTTP = @import("root").bun.HTTP.AsyncHTTP;
 const CrashReporter = @import("./crash_reporter.zig");
 
 const Report = @This();
@@ -69,15 +69,15 @@ pub const CrashReportWriter = struct {
         const file_path = std.fmt.bufPrintZ(
             &crash_reporter_path,
             "{s}/.bun-crash/v{s}-{d}.crash",
-            .{ base_dir, Global.package_json_version, @intCast(u64, @max(std.time.milliTimestamp(), 0)) },
+            .{ base_dir, Global.package_json_version, @as(u64, @intCast(@max(std.time.milliTimestamp(), 0))) },
         ) catch return;
 
-        std.fs.cwd().makeDir(std.fs.path.dirname(std.mem.span(file_path)).?) catch {};
+        std.fs.cwd().makeDir(std.fs.path.dirname(bun.asByteSlice(file_path)).?) catch {};
         var file = std.fs.cwd().createFileZ(file_path, .{ .truncate = true }) catch return;
         this.file = std.io.bufferedWriter(
             file.writer(),
         );
-        this.file_path = std.mem.span(file_path);
+        this.file_path = bun.asByteSlice(file_path);
     }
 
     pub fn printPath(this: *CrashReportWriter) void {
@@ -190,7 +190,7 @@ pub fn fatal(err_: ?anyerror, msg_: ?string) void {
         }
 
         if (msg_) |msg| {
-            const msg_ptr = @ptrToInt(msg.ptr);
+            const msg_ptr = @intFromPtr(msg.ptr);
             if (msg_ptr > 0) {
                 const len = @max(@min(msg.len, 1024), 0);
 
@@ -230,7 +230,7 @@ pub fn fatal(err_: ?anyerror, msg_: ?string) void {
 
         // It only is a real crash report if it's not coming from Zig
 
-        if (comptime !@import("bun").JSC.is_bindgen) {
+        if (comptime !@import("root").bun.JSC.is_bindgen) {
             std.mem.doNotOptimizeAway(&Bun__crashReportWrite);
             Bun__crashReportDumpStackTrace(&crash_report_writer);
         }
@@ -274,7 +274,7 @@ pub noinline fn handleCrash(signal: i32, addr: usize) void {
         .{ @errorName(name), bun.fmt.hexIntUpper(addr) },
     );
     printMetadata();
-    if (comptime !@import("bun").JSC.is_bindgen) {
+    if (comptime !@import("root").bun.JSC.is_bindgen) {
         std.mem.doNotOptimizeAway(&Bun__crashReportWrite);
         Bun__crashReportDumpStackTrace(&crash_report_writer);
     }
@@ -296,10 +296,10 @@ pub noinline fn handleCrash(signal: i32, addr: usize) void {
         }
     }
 
-    std.c._exit(128 + @truncate(u8, @intCast(u8, @max(signal, 0))));
+    std.c._exit(128 + @as(u8, @truncate(@as(u8, @intCast(@max(signal, 0))))));
 }
 
-pub noinline fn globalError(err: anyerror) noreturn {
+pub noinline fn globalError(err: anyerror, trace_: @TypeOf(@errorReturnTrace())) noreturn {
     @setCold(true);
 
     if (@atomicRmw(bool, &globalError_ranOnce, .Xchg, true, .Monotonic)) {
@@ -336,7 +336,7 @@ pub noinline fn globalError(err: anyerror) noreturn {
             );
             Global.exit(1);
         },
-        error.InvalidArgument, error.InstallFailed => {
+        error.InvalidArgument, error.InstallFailed, error.InvalidPackageJSON => {
             Global.exit(1);
         },
         error.SystemFdQuotaExceeded => {
@@ -349,7 +349,7 @@ pub noinline fn globalError(err: anyerror) noreturn {
                     \\<d>Current limit: {d}<r>
                     \\
                     \\To fix this, try running:
-                    \\ 
+                    \\
                     \\  <cyan>sudo launchctl limit maxfiles 2147483646<r>
                     \\  <cyan>ulimit -n 2147483646<r>
                     \\
@@ -368,7 +368,7 @@ pub noinline fn globalError(err: anyerror) noreturn {
                     \\<d>Current limit: {d}<r>
                     \\
                     \\To fix this, try running:
-                    \\ 
+                    \\
                     \\  <cyan>sudo echo -e "\nfs.file-max=2147483646\n" >> /etc/sysctl.conf<r>
                     \\  <cyan>sudo sysctl -p<r>
                     \\  <cyan>ulimit -n 2147483646<r>
@@ -410,7 +410,7 @@ pub noinline fn globalError(err: anyerror) noreturn {
                     \\<d>Current limit: {d}<r>
                     \\
                     \\To fix this, try running:
-                    \\ 
+                    \\
                     \\  <cyan>ulimit -n 2147483646<r>
                     \\
                     \\You may also need to run:
@@ -430,7 +430,7 @@ pub noinline fn globalError(err: anyerror) noreturn {
                     \\<d>Current limit: {d}<r>
                     \\
                     \\To fix this, try running:
-                    \\ 
+                    \\
                     \\  <cyan>ulimit -n 2147483646<r>
                     \\
                     \\That will only work for the current shell. To fix this for the entire system, run:
@@ -466,6 +466,14 @@ pub noinline fn globalError(err: anyerror) noreturn {
         error.NotOpenForReading, error.Unexpected => {
             const limit = std.os.getrlimit(.NOFILE) catch std.mem.zeroes(std.os.rlimit);
 
+            if (trace_) |trace| {
+                print_stacktrace: {
+                    var debug_info = std.debug.getSelfDebugInfo() catch break :print_stacktrace;
+                    Output.disableBuffering();
+                    std.debug.writeStackTrace(trace.*, Output.errorWriter(), default_allocator, debug_info, std.io.tty.detectConfig(std.io.getStdErr())) catch break :print_stacktrace;
+                }
+            }
+
             if (limit.cur > 0 and limit.cur < (8096 * 2)) {
                 Output.prettyError(
                     \\
@@ -474,7 +482,7 @@ pub noinline fn globalError(err: anyerror) noreturn {
                     \\<d>Current limit: {d}<r>
                     \\
                     \\To fix this, try running:
-                    \\ 
+                    \\
                     \\  <cyan>ulimit -n 2147483646<r>
                     \\
                 ,
@@ -527,11 +535,12 @@ pub noinline fn globalError(err: anyerror) noreturn {
 
             Output.flush();
 
-            print_stacktrace: {
-                var debug_info = std.debug.getSelfDebugInfo() catch break :print_stacktrace;
-                var trace = @errorReturnTrace() orelse break :print_stacktrace;
-                Output.disableBuffering();
-                std.debug.writeStackTrace(trace.*, Output.errorWriter(), default_allocator, debug_info, std.debug.detectTTYConfig(std.io.getStdErr())) catch break :print_stacktrace;
+            if (trace_) |trace| {
+                print_stacktrace: {
+                    var debug_info = std.debug.getSelfDebugInfo() catch break :print_stacktrace;
+                    Output.disableBuffering();
+                    std.debug.writeStackTrace(trace.*, Output.errorWriter(), default_allocator, debug_info, std.io.tty.detectConfig(std.io.getStdErr())) catch break :print_stacktrace;
+                }
             }
 
             Global.exit(1);
@@ -541,6 +550,15 @@ pub noinline fn globalError(err: anyerror) noreturn {
                 "\n<r><red>error<r><d>:<r> <b>MissingPackageJSON<r>\nbun could not find a package.json file.\n",
                 .{},
             );
+
+            if (trace_) |trace| {
+                print_stacktrace: {
+                    var debug_info = std.debug.getSelfDebugInfo() catch break :print_stacktrace;
+                    Output.disableBuffering();
+                    std.debug.writeStackTrace(trace.*, Output.errorWriter(), default_allocator, debug_info, std.io.tty.detectConfig(std.io.getStdErr())) catch break :print_stacktrace;
+                }
+            }
+
             Global.exit(1);
         },
         error.MissingValue => {
@@ -550,12 +568,21 @@ pub noinline fn globalError(err: anyerror) noreturn {
     }
 
     Report.fatal(err, null);
+    if (trace_) |trace| {
+        print_stacktrace: {
+            var debug_info = std.debug.getSelfDebugInfo() catch break :print_stacktrace;
+            Output.disableBuffering();
+            std.debug.writeStackTrace(trace.*, Output.errorWriter(), default_allocator, debug_info, std.io.tty.detectConfig(std.io.getStdErr())) catch break :print_stacktrace;
+        }
+    }
 
-    print_stacktrace: {
-        var debug_info = std.debug.getSelfDebugInfo() catch break :print_stacktrace;
-        var trace = @errorReturnTrace() orelse break :print_stacktrace;
-        Output.disableBuffering();
-        std.debug.writeStackTrace(trace.*, Output.errorWriter(), default_allocator, debug_info, std.debug.detectTTYConfig(std.io.getStdErr())) catch break :print_stacktrace;
+    if (bun.auto_reload_on_crash) {
+        // attempt to prevent a double panic
+        bun.auto_reload_on_crash = false;
+
+        Output.prettyErrorln("<d>---<r> Bun is auto-restarting due to crash <d>[time: <b>{d}<r><d>] ---<r>", .{@max(std.time.milliTimestamp(), 0)});
+        Output.flush();
+        bun.reloadProcess(bun.default_allocator, false);
     }
 
     Global.exit(1);

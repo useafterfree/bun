@@ -44,6 +44,7 @@
  * @see [source](https://github.com/nodejs/node/blob/v18.0.0/lib/buffer.js)
  */
 declare module "buffer" {
+  import { ArrayBufferView } from "bun";
   export const INSPECT_MAX_BYTES: number;
   export const kMaxLength: number;
   export type TranscodeEncoding =
@@ -244,7 +245,7 @@ declare module "buffer" {
        * @return The number of bytes contained within `string`.
        */
       byteLength(
-        string: string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer,
+        string: string | ArrayBufferView | ArrayBufferLike,
         encoding?: BufferEncoding,
       ): number;
       /**
@@ -546,6 +547,7 @@ declare module "buffer" {
         type: "Buffer";
         data: number[];
       };
+
       /**
        * Returns `true` if both `buf` and `otherBuffer` have exactly the same bytes,`false` otherwise. Equivalent to `buf.compare(otherBuffer) === 0`.
        *
@@ -2082,6 +2084,30 @@ declare module "buffer" {
       values(): IterableIterator<number>;
     }
     var Buffer: BufferConstructor;
+
+    /**
+     * This function returns `true` if `input` contains only valid UTF-8-encoded data,
+     * including the case in which `input` is empty.
+     *
+     * Throws if the `input` is a detached array buffer.
+     * @since Bun v0.6.13
+     * @param input The input to validate.
+     */
+    export function isUtf8(
+      input: TypedArray | ArrayBufferLike | DataView,
+    ): boolean;
+
+    /**
+     * This function returns `true` if `input` contains only valid ASCII-encoded data,
+     * including the case in which `input` is empty.
+     *
+     * Throws if the `input` is a detached array buffer.
+     * @since Bun v0.6.13
+     * @param input The input to validate.
+     */
+    export function isAscii(
+      input: TypedArray | ArrayBufferLike | DataView,
+    ): boolean;
   }
 }
 declare module "node:buffer" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const bun = @import("root").bun;
 const builtin = @import("builtin");
 const os = std.os;
 const mem = std.mem;
@@ -66,11 +67,11 @@ pub const COPYFILE_SKIP = @as(c_int, 1);
 pub const COPYFILE_QUIT = @as(c_int, 2);
 
 // int clonefileat(int src_dirfd, const char * src, int dst_dirfd, const char * dst, int flags);
-pub extern "c" fn clonefileat(c_int, [*c]const u8, c_int, [*c]const u8, uint32_t: c_int) c_int;
+pub extern "c" fn clonefileat(c_int, [*:0]const u8, c_int, [*:0]const u8, uint32_t: c_int) c_int;
 // int fclonefileat(int srcfd, int dst_dirfd, const char * dst, int flags);
-pub extern "c" fn fclonefileat(c_int, c_int, [*c]const u8, uint32_t: c_int) c_int;
+pub extern "c" fn fclonefileat(c_int, c_int, [*:0]const u8, uint32_t: c_int) c_int;
 // int clonefile(const char * src, const char * dst, int flags);
-pub extern "c" fn clonefile([*c]const u8, [*c]const u8, uint32_t: c_int) c_int;
+pub extern "c" fn clonefile(src: [*:0]const u8, dest: [*:0]const u8, flags: c_int) c_int;
 
 // pub fn stat_absolute(path: [:0]const u8) StatError!Stat {
 //     if (builtin.os.tag == .windows) {
@@ -139,39 +140,40 @@ pub extern "c" fn clonefile([*c]const u8, [*c]const u8, uint32_t: c_int) c_int;
 //     };
 // }
 
-pub const struct_fstore = extern struct {
-    fst_flags: c_uint,
-    fst_posmode: c_int,
-    fst_offset: off_t,
-    fst_length: off_t,
-    fst_bytesalloc: off_t,
-};
-pub const fstore_t = struct_fstore;
+// benchmarking this did nothing on macOS
+// i verified it wasn't returning -1
+pub fn preallocate_file(_: os.fd_t, _: off_t, _: off_t) !void {
+    //     pub const struct_fstore = extern struct {
+    //     fst_flags: c_uint,
+    //     fst_posmode: c_int,
+    //     fst_offset: off_t,
+    //     fst_length: off_t,
+    //     fst_bytesalloc: off_t,
+    // };
+    // pub const fstore_t = struct_fstore;
 
-pub const F_ALLOCATECONTIG = @as(c_int, 0x00000002);
-pub const F_ALLOCATEALL = @as(c_int, 0x00000004);
-pub const F_PEOFPOSMODE = @as(c_int, 3);
-pub const F_VOLPOSMODE = @as(c_int, 4);
+    // pub const F_ALLOCATECONTIG = @as(c_int, 0x00000002);
+    // pub const F_ALLOCATEALL = @as(c_int, 0x00000004);
+    // pub const F_PEOFPOSMODE = @as(c_int, 3);
+    // pub const F_VOLPOSMODE = @as(c_int, 4);
+    // var fstore = zeroes(fstore_t);
+    // fstore.fst_flags = F_ALLOCATECONTIG;
+    // fstore.fst_posmode = F_PEOFPOSMODE;
+    // fstore.fst_offset = 0;
+    // fstore.fst_length = len + offset;
 
-pub fn preallocate_file(fd: os.fd_t, offset: off_t, len: off_t) !void {
-    var fstore = zeroes(fstore_t);
-    fstore.fst_flags = F_ALLOCATECONTIG;
-    fstore.fst_posmode = F_PEOFPOSMODE;
-    fstore.fst_offset = 0;
-    fstore.fst_length = len + offset;
+    // // Based on https://api.kde.org/frameworks/kcoreaddons/html/posix__fallocate__mac_8h_source.html
+    // var rc = os.system.fcntl(fd, os.F.PREALLOCATE, &fstore);
 
-    // Based on https://api.kde.org/frameworks/kcoreaddons/html/posix__fallocate__mac_8h_source.html
-    var rc = os.system.fcntl(fd, os.F.PREALLOCATE, &fstore);
+    // switch (rc) {
+    //     0 => return,
+    //     else => {
+    //         fstore.fst_flags = F_ALLOCATEALL;
+    //         rc = os.system.fcntl(fd, os.F.PREALLOCATE, &fstore);
+    //     },
+    // }
 
-    switch (rc) {
-        0 => return,
-        else => {
-            fstore.fst_flags = F_ALLOCATEALL;
-            rc = os.system.fcntl(fd, os.F.PREALLOCATE, &fstore);
-        },
-    }
-
-    std.mem.doNotOptimizeAway(&fstore);
+    // std.mem.doNotOptimizeAway(&fstore);
 }
 
 pub const SystemErrno = enum(u8) {
@@ -284,6 +286,20 @@ pub const SystemErrno = enum(u8) {
     EQFULL = 106,
 
     pub const max = 107;
+
+    pub fn init(code: anytype) ?SystemErrno {
+        if (comptime std.meta.trait.isSignedInt(@TypeOf(code))) {
+            if (code < 0)
+                return init(-code);
+        }
+
+        if (code >= max) return null;
+        return @as(SystemErrno, @enumFromInt(code));
+    }
+
+    pub fn label(this: SystemErrno) ?[]const u8 {
+        return labels.get(this) orelse null;
+    }
 
     const LabelMap = std.EnumMap(SystemErrno, []const u8);
     pub const labels: LabelMap = brk: {
@@ -444,9 +460,9 @@ pub const io_object_t = c_uint;
 pub const io_service_t = c_uint;
 pub const io_registry_entry_t = c_uint;
 pub const FSEventStreamCallback = ?*const fn (FSEventStreamRef, ?*anyopaque, c_int, ?*anyopaque, [*c]const FSEventStreamEventFlags, [*c]const FSEventStreamEventId) callconv(.C) void;
-pub const kCFStringEncodingUTF8: CFStringEncoding = @bitCast(CFStringEncoding, @as(c_int, 134217984));
+pub const kCFStringEncodingUTF8: CFStringEncoding = @as(CFStringEncoding, @bitCast(@as(c_int, 134217984)));
 pub const noErr: OSStatus = 0;
-pub const kFSEventStreamEventIdSinceNow: FSEventStreamEventId = @bitCast(FSEventStreamEventId, @as(c_longlong, -@as(c_int, 1)));
+pub const kFSEventStreamEventIdSinceNow: FSEventStreamEventId = @as(FSEventStreamEventId, @bitCast(@as(c_longlong, -@as(c_int, 1))));
 pub const kFSEventStreamCreateFlagNoDefer: c_int = 2;
 pub const kFSEventStreamCreateFlagFileEvents: c_int = 16;
 pub const kFSEventStreamEventFlagEventIdsWrapped: c_int = 8;
@@ -505,7 +521,7 @@ pub fn get_system_uptime() u64 {
         else => return 0,
     };
 
-    return @bitCast(u64, std.time.timestamp() - uptime_[0].sec);
+    return @as(u64, @bitCast(std.time.timestamp() - uptime_[0].sec));
 }
 
 pub const struct_LoadAvg = struct {
@@ -527,13 +543,28 @@ pub fn get_system_loadavg() [3]f64 {
     };
 
     const loadavg = loadavg_[0];
-    const scale = @intToFloat(f64, loadavg.fscale);
+    const scale = @as(f64, @floatFromInt(loadavg.fscale));
     return [3]f64{
-        @intToFloat(f64, loadavg.ldavg[0]) / scale,
-        @intToFloat(f64, loadavg.ldavg[1]) / scale,
-        @intToFloat(f64, loadavg.ldavg[2]) / scale,
+        @as(f64, @floatFromInt(loadavg.ldavg[0])) / scale,
+        @as(f64, @floatFromInt(loadavg.ldavg[1])) / scale,
+        @as(f64, @floatFromInt(loadavg.ldavg[2])) / scale,
     };
 }
+
+pub const processor_flavor_t = c_int;
+
+// https://opensource.apple.com/source/xnu/xnu-792/osfmk/mach/processor_info.h.auto.html
+pub const PROCESSOR_CPU_LOAD_INFO: processor_flavor_t = 2;
+// https://opensource.apple.com/source/xnu/xnu-792/osfmk/mach/machine.h.auto.html
+pub const CPU_STATE_MAX = 4;
+pub const processor_cpu_load_info = extern struct {
+    cpu_ticks: [CPU_STATE_MAX]c_uint,
+};
+pub const PROCESSOR_CPU_LOAD_INFO_COUNT = @as(std.c.mach_msg_type_number_t, @sizeOf(processor_cpu_load_info) / @sizeOf(std.c.natural_t));
+pub const processor_info_array_t = [*]c_int;
+pub const PROCESSOR_INFO_MAX = 1024;
+
+pub extern fn host_processor_info(host: std.c.host_t, flavor: processor_flavor_t, out_processor_count: *std.c.natural_t, out_processor_info: *processor_info_array_t, out_processor_infoCnt: *std.c.mach_msg_type_number_t) std.c.E;
 
 pub extern fn getuid(...) std.os.uid_t;
 pub extern fn getgid(...) std.os.gid_t;
@@ -542,7 +573,7 @@ pub extern fn get_process_priority(pid: c_uint) i32;
 pub extern fn set_process_priority(pid: c_uint, priority: c_int) i32;
 
 pub fn get_version(buf: []u8) []const u8 {
-    @memset(buf.ptr, 0, buf.len);
+    @memset(buf, 0);
 
     var size: usize = buf.len;
 
@@ -554,11 +585,11 @@ pub fn get_version(buf: []u8) []const u8 {
         0,
     ) == -1) return "unknown";
 
-    return std.mem.span(std.meta.assumeSentinel(buf.ptr, 0));
+    return bun.sliceTo(buf, 0);
 }
 
 pub fn get_release(buf: []u8) []const u8 {
-    @memset(buf.ptr, 0, buf.len);
+    @memset(buf, 0);
 
     var size: usize = buf.len;
 
@@ -570,7 +601,7 @@ pub fn get_release(buf: []u8) []const u8 {
         0,
     ) == -1) return "unknown";
 
-    return std.mem.span(std.meta.assumeSentinel(buf.ptr, 0));
+    return bun.sliceTo(buf, 0);
 }
 
 const IO_CTL_RELATED = struct {
@@ -719,3 +750,46 @@ pub const RemoveFileFlags = struct {
 };
 pub const removefile_state_t = opaque {};
 pub extern fn removefileat(fd: c_int, path: [*c]const u8, state: ?*removefile_state_t, flags: u32) c_int;
+
+// As of Zig v0.11.0-dev.1393+38eebf3c4, ifaddrs.h is not included in the headers
+pub const ifaddrs = extern struct {
+    ifa_next: ?*ifaddrs,
+    ifa_name: [*:0]u8,
+    ifa_flags: c_uint,
+    ifa_addr: ?*std.os.sockaddr,
+    ifa_netmask: ?*std.os.sockaddr,
+    ifa_dstaddr: ?*std.os.sockaddr,
+    ifa_data: *anyopaque,
+};
+pub extern fn getifaddrs(*?*ifaddrs) c_int;
+pub extern fn freeifaddrs(?*ifaddrs) void;
+
+const net_if_h = @cImport({
+    @cInclude("net/if.h");
+});
+pub const IFF_RUNNING = net_if_h.IFF_RUNNING;
+pub const IFF_UP = net_if_h.IFF_UP;
+pub const IFF_LOOPBACK = net_if_h.IFF_LOOPBACK;
+pub const sockaddr_dl = extern struct {
+    sdl_len: u8, // Total length of sockaddr */
+    sdl_family: u8, // AF_LINK */
+    sdl_index: u16, // if != 0, system given index for interface */
+    sdl_type: u8, // interface type */
+    sdl_nlen: u8, // interface name length, no trailing 0 reqd. */
+    sdl_alen: u8, // link level address length */
+    sdl_slen: u8, // link layer selector length */
+    sdl_data: [12]u8, // minimum work area, can be larger; contains both if name and ll address */
+    //#ifndef __APPLE__
+    //	/* For TokenRing */
+    //	u_short sdl_rcf;        /* source routing control */
+    //	u_short sdl_route[16];  /* source routing information */
+    //#endif
+};
+
+pub usingnamespace @cImport({
+    @cInclude("sys/spawn.h");
+});
+
+// it turns out preallocating on APFS on an M1 is slower.
+// so this is a linux-only optimization for now.
+pub const preallocate_length = std.math.maxInt(u51);

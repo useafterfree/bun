@@ -47,6 +47,7 @@ _bun() {
                 '-g[Add a package globally]' \
                 '--global[Add a package globally]' \
                 '--production[Don'"'"'t install devDependencies]' \
+                '--frozen-lockfile[Disallow changes to lockfile]' \
                 '--optional[Add dependency to optionalDependencies]' \
                 '--development[Add dependency to devDependencies]' \
                 '-d[Add dependency to devDependencies]' \
@@ -88,6 +89,7 @@ _bun() {
                 '--yarn[Write a yarn.lock file (yarn v1)]' \
                 '--global[Add a package globally]' \
                 '--production[Don'"'"'t install devDependencies]' \
+                '--frozen-lockfile[Disallow changes to lockfile]' \
                 '--optional[Add dependency to optionalDependencies]' \
                 '--development[Add dependency to devDependencies]' \
                 '-d[Add dependency to devDependencies]' \
@@ -123,6 +125,7 @@ _bun() {
                 '--yarn[Write a yarn.lock file (yarn v1)]' \
                 '--global[Add a package globally]' \
                 '--production[Don'"'"'t install devDependencies]' \
+                '--frozen-lockfile[Disallow changes to lockfile]' \
                 '--optional[Add dependency to optionalDependencies]' \
                 '--development[Add dependency to devDependencies]' \
                 '-d[Add dependency to devDependencies]' \
@@ -278,6 +281,7 @@ _bun() {
                 '--yarn[Write a yarn.lock file (yarn v1)]'
                 '-p[Do not install devDependencies]'
                 '--production[Do not install devDependencies]'
+                '--frozen-lockfile[Disallow changes to lockfile]' \
                 '--no-save[Do not save a lockfile]'
                 '--dry-run[Do not install anything]'
                 '--lockfile[Store & load a lockfile at a specific filepath]'
@@ -532,6 +536,7 @@ _bun() {
                 '--yarn[Write a yarn.lock file (yarn v1)]' \
                 '--production[Don'"'"'t install devDependencies]' \
                 '-p[Don'"'"'t install devDependencies]' \
+                '--frozen-lockfile[Disallow changes to lockfile]' \
                 '--no-save[]' \
                 '--dry-run[Don'"'"'t install anything]' \
                 '--force[Always request the latest versions from the registry & reinstall all dependenices]' \
@@ -565,6 +570,7 @@ _bun() {
                 '--yarn[Write a yarn.lock file (yarn v1)]' \
                 '--production[Don'"'"'t install devDependencies]' \
                 '-p[Don'"'"'t install devDependencies]' \
+                '--frozen-lockfile[Disallow changes to lockfile]' \
                 '--no-save[]' \
                 '--dry-run[Don'"'"'t install anything]' \
                 '-g[Remove a package globally]' \
@@ -635,24 +641,11 @@ _bun() {
 _bun_run_param_script_completion() {
     local -a scripts_list
     IFS=$'\n' scripts_list=($(SHELL=zsh bun getcompletes s))
-    scripts="scripts:scripts:(($scripts_list))"
-
-    IFS=$'\n' bunjs=($(SHELL=zsh bun getcompletes j))
     IFS=$'\n' bins=($(SHELL=zsh bun getcompletes b))
-
-    if [ -n "$bunjs" ] && [ "$bunjs" != " " ]; then
-        if [ -n "$bins" ] && [ "$bins" != " " ]; then
-            _alternative $scripts "files:files:(($bunjs))" "bin:bin:(($bins))"
-            return 1
-        fi
-
-        _alternative $scripts "args:Bun.js:(($bunjs))"
-    fi
-
-    if [ -n "$bins" ] && [ "$bins" != " " ]; then
-        _alternative $scripts "args:bin:(($bins))"
-        return 1
-    fi
+    
+    _alternative "scripts:scripts:(($scripts_list))"
+    _alternative "bin:bin:(($bins))"
+    _alternative "files:file:_files -g '*.(js|ts|jsx|tsx|wasm)'"
 }
 
 _set_remove() {

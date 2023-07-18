@@ -1,10 +1,10 @@
-const logger = @import("bun").logger;
+const logger = @import("root").bun.logger;
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Fs = @import("../fs.zig");
-const js_ast = @import("../js_ast.zig");
-const Bundler = @import("../bundler.zig").Bundler;
+const js_ast = bun.JSAst;
+const Bundler = bun.Bundler;
 const strings = bun.strings;
 pub const FallbackEntryPoint = struct {
     code_buffer: [8096]u8 = undefined,
@@ -85,9 +85,9 @@ pub const ClientEntryPoint = struct {
         var joined_base_and_dir_parts = [_]string{ original_path.dir, original_path.base };
         var generated_path = Fs.FileSystem.instance.absBuf(&joined_base_and_dir_parts, outbuffer);
 
-        std.mem.copy(u8, outbuffer[generated_path.len..], ".entry");
+        bun.copy(u8, outbuffer[generated_path.len..], ".entry");
         generated_path = outbuffer[0 .. generated_path.len + ".entry".len];
-        std.mem.copy(u8, outbuffer[generated_path.len..], original_path.ext);
+        bun.copy(u8, outbuffer[generated_path.len..], original_path.ext);
         return outbuffer[0 .. generated_path.len + original_path.ext.len];
     }
 
@@ -99,7 +99,7 @@ pub const ClientEntryPoint = struct {
             original_ext = original_path.ext[entry_i + "entry".len ..];
         }
 
-        std.mem.copy(u8, outbuffer[generated_path.len..], original_ext);
+        bun.copy(u8, outbuffer[generated_path.len..], original_ext);
 
         return outbuffer[0 .. generated_path.len + original_ext.len];
     }
@@ -157,12 +157,11 @@ pub const ClientEntryPoint = struct {
 };
 
 pub const ServerEntryPoint = struct {
-    code_buffer: [bun.MAX_PATH_BYTES * 2 + 500]u8 = undefined,
-    output_code_buffer: [bun.MAX_PATH_BYTES * 8 + 500]u8 = undefined,
     source: logger.Source = undefined,
 
     pub fn generate(
         entry: *ServerEntryPoint,
+        allocator: std.mem.Allocator,
         is_hot_reload_enabled: bool,
         original_path: Fs.PathName,
         name: string,
@@ -182,18 +181,12 @@ pub const ServerEntryPoint = struct {
 
         const code = brk: {
             if (is_hot_reload_enabled) {
-                break :brk try std.fmt.bufPrint(
-                    &entry.code_buffer,
+                break :brk try std.fmt.allocPrint(
+                    allocator,
                     \\//Auto-generated file
-                    \\var cjsSymbol = Symbol.for("CommonJS");
                     \\var hmrSymbol = Symbol.for("BunServerHMR");
                     \\import * as start from '{s}{s}';
-                    \\export * from '{s}{s}';
                     \\var entryNamespace = start;
-                    \\var cjs = start?.default;
-                    \\if (cjs && typeof cjs ===  'function' && cjsSymbol in cjs) {{
-                    \\  entryNamespace = cjs();
-                    \\}}
                     \\if (typeof entryNamespace?.then === 'function') {{
                     \\   entryNamespace = entryNamespace.then((entryNamespace) => {{
                     \\      if(typeof entryNamespace?.default?.fetch === 'function')  {{
@@ -220,22 +213,14 @@ pub const ServerEntryPoint = struct {
                     .{
                         dir_to_use,
                         original_path.filename,
-                        dir_to_use,
-                        original_path.filename,
                     },
                 );
             }
-            break :brk try std.fmt.bufPrint(
-                &entry.code_buffer,
+            break :brk try std.fmt.allocPrint(
+                allocator,
                 \\//Auto-generated file
-                \\var cjsSymbol = Symbol.for("CommonJS");
                 \\import * as start from '{s}{s}';
-                \\export * from '{s}{s}';
                 \\var entryNamespace = start;
-                \\var cjs = start?.default;
-                \\if (cjs && typeof cjs ===  'function' && cjsSymbol in cjs) {{
-                \\  entryNamespace = cjs();
-                \\}}
                 \\if (typeof entryNamespace?.then === 'function') {{
                 \\   entryNamespace = entryNamespace.then((entryNamespace) => {{
                 \\      if(typeof entryNamespace?.default?.fetch === 'function')  {{
@@ -248,8 +233,6 @@ pub const ServerEntryPoint = struct {
                 \\
             ,
                 .{
-                    dir_to_use,
-                    original_path.filename,
                     dir_to_use,
                     original_path.filename,
                 },
@@ -273,7 +256,7 @@ pub const MacroEntryPoint = struct {
     source: logger.Source = undefined,
 
     pub fn generateID(entry_path: string, function_name: string, buf: []u8, len: *u32) i32 {
-        var hasher = std.hash.Wyhash.init(0);
+        var hasher = bun.Wyhash.init(0);
         hasher.update(js_ast.Macro.namespaceWithColon);
         hasher.update(entry_path);
         hasher.update(function_name);
@@ -281,13 +264,13 @@ pub const MacroEntryPoint = struct {
         const fmt = bun.fmt.hexIntLower(hash);
 
         const specifier = std.fmt.bufPrint(buf, js_ast.Macro.namespaceWithColon ++ "//{any}.js", .{fmt}) catch unreachable;
-        len.* = @truncate(u32, specifier.len);
+        len.* = @as(u32, @truncate(specifier.len));
 
         return generateIDFromSpecifier(specifier);
     }
 
     pub fn generateIDFromSpecifier(specifier: string) i32 {
-        return @bitCast(i32, @truncate(u32, std.hash.Wyhash.hash(0, specifier)));
+        return @as(i32, @bitCast(@as(u32, @truncate(bun.hash(specifier)))));
     }
 
     pub fn generate(
@@ -299,7 +282,7 @@ pub const MacroEntryPoint = struct {
         macro_label_: string,
     ) !void {
         const dir_to_use: string = import_path.dirWithTrailingSlash();
-        std.mem.copy(u8, entry.code_buffer[0..macro_label_.len], macro_label_);
+        bun.copy(u8, &entry.code_buffer, macro_label_);
         const macro_label = entry.code_buffer[0..macro_label_.len];
 
         const code = try std.fmt.bufPrint(

@@ -1,7 +1,7 @@
 const boring = @import("./deps/boringssl.translated.zig");
 pub usingnamespace boring;
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 
 const builtin = @import("builtin");
 var loaded = false;
@@ -13,6 +13,12 @@ pub fn load() void {
     boring.SSL_load_error_strings();
     boring.ERR_load_BIO_strings();
     boring.OpenSSL_add_all_algorithms();
+
+    if (!builtin.is_test) {
+        std.mem.doNotOptimizeAway(&OPENSSL_memory_alloc);
+        std.mem.doNotOptimizeAway(&OPENSSL_memory_get_size);
+        std.mem.doNotOptimizeAway(&OPENSSL_memory_free);
+    }
 }
 
 var ctx_: ?*boring.SSL_CTX = null;
@@ -59,7 +65,8 @@ export fn OPENSSL_memory_alloc(size: usize) ?*anyopaque {
 
 // BoringSSL always expects memory to be zero'd
 export fn OPENSSL_memory_free(ptr: *anyopaque) void {
-    @memset(@ptrCast([*]u8, ptr), 0, bun.Mimalloc.mi_usable_size(ptr));
+    const len = bun.Mimalloc.mi_usable_size(ptr);
+    @memset(@as([*]u8, @ptrCast(ptr))[0..len], 0);
     bun.Mimalloc.mi_free(ptr);
 }
 
@@ -69,12 +76,4 @@ export fn OPENSSL_memory_get_size(ptr: ?*const anyopaque) usize {
 
 test "load" {
     load();
-}
-
-comptime {
-    if (!builtin.is_test) {
-        _ = OPENSSL_memory_alloc;
-        _ = OPENSSL_memory_free;
-        _ = OPENSSL_memory_get_size;
-    }
 }

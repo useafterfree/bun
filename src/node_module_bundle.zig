@@ -2,7 +2,7 @@ const schema = @import("./api/schema.zig");
 const Api = schema.Api;
 const std = @import("std");
 const Fs = @import("./fs.zig");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -54,18 +54,12 @@ pub const NodeModuleBundle = struct {
 
     code_string: ?AllocatedString = null,
 
-    bytecode_cache_fetcher: Fs.BytecodeCacheFetcher = Fs.BytecodeCacheFetcher{},
-
     pub const magic_bytes = "#!/usr/bin/env bun\n\n";
     threadlocal var jsbundle_prefix: [magic_bytes.len + 5]u8 = undefined;
 
     // TODO: support preact-refresh, others by not hard coding
     pub fn hasFastRefresh(this: *const NodeModuleBundle) bool {
         return this.package_name_map.contains("react-refresh");
-    }
-
-    pub inline fn fetchByteCodeCache(this: *NodeModuleBundle, basename: string, fs: *Fs.FileSystem.RealFS) ?StoredFileDescriptorType {
-        return this.bytecode_cache_fetcher.fetch(basename, fs);
     }
 
     pub fn readCodeAsStringSlow(this: *NodeModuleBundle, allocator: std.mem.Allocator) !string {
@@ -77,7 +71,7 @@ pub const NodeModuleBundle = struct {
 
         var buf = try allocator.alloc(u8, this.code_end_pos);
         const count = try file.preadAll(buf, this.codeStartOffset());
-        this.code_string = AllocatedString{ .str = buf[0..count], .len = @truncate(u32, buf.len), .allocator = allocator };
+        this.code_string = AllocatedString{ .str = buf[0..count], .len = @as(u32, @truncate(buf.len)), .allocator = allocator };
         return this.code_string.?.str;
     }
 
@@ -85,7 +79,7 @@ pub const NodeModuleBundle = struct {
         this.package_name_map = PackageNameMap.init(this.allocator);
         this.package_id_map = PackageIDMap.init(this.allocator);
 
-        const package_count = @truncate(u32, this.bundle.packages.len);
+        const package_count = @as(u32, @truncate(this.bundle.packages.len));
 
         // this.package_has_multiple_versions = try std.bit_set.DynamicBitSet.initFull(package_count, this.allocator);
 
@@ -99,10 +93,10 @@ pub const NodeModuleBundle = struct {
         );
         var prev_package_ids_for_name: []u32 = &[_]u32{};
 
-        for (this.bundle.packages) |package, _package_id| {
-            const package_id = @truncate(u32, _package_id);
+        for (this.bundle.packages, 0..) |package, _package_id| {
+            const package_id = @as(u32, @truncate(_package_id));
             std.debug.assert(package.hash != 0);
-            this.package_id_map.putAssumeCapacityNoClobber(package.hash, @truncate(u32, package_id));
+            this.package_id_map.putAssumeCapacityNoClobber(package.hash, @as(u32, @truncate(package_id)));
 
             const package_name = this.str(package.name);
             var entry = this.package_name_map.getOrPutAssumeCapacity(package_name);
@@ -113,7 +107,7 @@ pub const NodeModuleBundle = struct {
                 // This catches any issues with the sorting order, which would cause all sorts of weird bugs
                 // This also allows us to simply extend the length of the previous slice to the new length
                 // Saving us an allocation
-                if (@ptrToInt(prev_package_ids_for_name.ptr) != @ptrToInt(entry.value_ptr.ptr)) {
+                if (@intFromPtr(prev_package_ids_for_name.ptr) != @intFromPtr(entry.value_ptr.ptr)) {
                     Output.prettyErrorln(
                         \\<r><red>Fatal<r>: incorrect package sorting order detected in .bun file.\n
                         \\This is a bug! Please create an issue.\n
@@ -153,12 +147,12 @@ pub const NodeModuleBundle = struct {
 
     pub fn getPackage(this: *const NodeModuleBundle, name: string) ?*const Api.JavascriptBundledPackage {
         const package_id = this.getPackageIDByName(name) orelse return null;
-        return &this.bundle.packages[@intCast(usize, package_id[0])];
+        return &this.bundle.packages[@as(usize, @intCast(package_id[0]))];
     }
 
     pub fn hasModule(this: *const NodeModuleBundle, name: string) ?*const Api.JavascriptBundledPackage {
         const package_id = this.getPackageID(name) orelse return null;
-        return &this.bundle.packages[@intCast(usize, package_id)];
+        return &this.bundle.packages[@as(usize, @intCast(package_id))];
     }
 
     pub const ModuleQuery = struct {
@@ -201,9 +195,9 @@ pub const NodeModuleBundle = struct {
         package: *const Api.JavascriptBundledPackage,
         _query: string,
     ) ?u32 {
-        for (modulesIn(&this.bundle, package)) |mod, i| {
+        for (modulesIn(&this.bundle, package), 0..) |mod, i| {
             if (strings.eql(this.str(mod.path), _query)) {
-                return @truncate(u32, i + package.modules_offset);
+                return @as(u32, @truncate(i + package.modules_offset));
             }
         }
 
@@ -231,9 +225,9 @@ pub const NodeModuleBundle = struct {
                 const lhs_name = context.moduleName(&lhs);
                 const rhs_name = context.moduleName(&rhs);
 
-                const traversal_length = std.math.min(lhs_name.len, rhs_name.len);
+                const traversal_length = @min(lhs_name.len, rhs_name.len);
 
-                for (lhs_name[0..traversal_length]) |char, i| {
+                for (lhs_name[0..traversal_length], 0..) |char, i| {
                     switch (std.math.order(char, rhs_name[i])) {
                         .lt, .gt => |order| {
                             return order;
@@ -249,20 +243,20 @@ pub const NodeModuleBundle = struct {
             .package_id = 0,
             .code = .{},
             .path = .{
-                .offset = @truncate(u32, this.bundle.manifest_string.len),
+                .offset = @as(u32, @truncate(this.bundle.manifest_string.len)),
             },
         };
 
         var finder = ModuleFinder{ .ctx = this, .pkg = package, .query = _query };
 
         const modules = modulesIn(&this.bundle, package);
-        return @intCast(u32, std.sort.binarySearch(
+        return @as(u32, @intCast(std.sort.binarySearch(
             Api.JavascriptBundledModule,
             to_find,
             modules,
             finder,
             ModuleFinder.cmpAsc,
-        ) orelse return null) + package.modules_offset;
+        ) orelse return null)) + package.modules_offset;
     }
 
     pub fn findModuleIDInPackageIgnoringExtension(
@@ -289,9 +283,9 @@ pub const NodeModuleBundle = struct {
                 const lhs_name = context.moduleName(&lhs);
                 const rhs_name = context.moduleName(&rhs);
 
-                const traversal_length = std.math.min(lhs_name.len, rhs_name.len);
+                const traversal_length = @min(lhs_name.len, rhs_name.len);
 
-                for (lhs_name[0..traversal_length]) |char, i| {
+                for (lhs_name[0..traversal_length], 0..) |char, i| {
                     switch (std.math.order(char, rhs_name[i])) {
                         .lt, .gt => |order| {
                             return order;
@@ -307,20 +301,20 @@ pub const NodeModuleBundle = struct {
             .package_id = 0,
             .code = .{},
             .path = .{
-                .offset = @truncate(u32, this.bundle.manifest_string.len),
+                .offset = @as(u32, @truncate(this.bundle.manifest_string.len)),
             },
         };
 
         var finder = ModuleFinder{ .ctx = this, .pkg = package, .query = _query[0 .. _query.len - std.fs.path.extension(_query).len] };
 
         const modules = modulesIn(&this.bundle, package);
-        return @intCast(u32, std.sort.binarySearch(
+        return @as(u32, @intCast(std.sort.binarySearch(
             Api.JavascriptBundledModule,
             to_find,
             modules,
             finder,
             ModuleFinder.cmpAsc,
-        ) orelse return null) + package.modules_offset;
+        ) orelse return null)) + package.modules_offset;
     }
 
     pub fn init(container: Api.JavascriptBundleContainer, allocator: std.mem.Allocator) NodeModuleBundle {
@@ -361,7 +355,7 @@ pub const NodeModuleBundle = struct {
             .bundle = container.bundle.?,
             .fd = stream.handle,
             // sorry you can't have 4 GB of node_modules
-            .code_end_pos = end - @intCast(u32, jsbundle_prefix.len),
+            .code_end_pos = end - @as(u32, @intCast(jsbundle_prefix.len)),
             .bytes = read_bytes,
             .bytes_ptr = file_bytes,
             .package_id_map = undefined,
@@ -386,7 +380,7 @@ pub const NodeModuleBundle = struct {
                 .{ this.str(pkg.name), this.str(pkg.version) },
             );
 
-            for (modules) |module, module_i| {
+            for (modules, 0..) |module, module_i| {
                 const size_level: SizeLevel =
                     switch (module.code.length) {
                     0...5_000 => .good,
@@ -408,7 +402,7 @@ pub const NodeModuleBundle = struct {
 
             Output.print("\n", .{});
         }
-        const source_code_size = this.container.code_length.? - @intCast(u32, jsbundle_prefix.len);
+        const source_code_size = this.container.code_length.? - @as(u32, @intCast(jsbundle_prefix.len));
 
         Output.pretty("<b>", .{});
         prettySize(source_code_size, .neutral, ">");
@@ -418,7 +412,7 @@ pub const NodeModuleBundle = struct {
     }
 
     pub inline fn codeStartOffset(_: *const NodeModuleBundle) u32 {
-        return @intCast(u32, jsbundle_prefix.len);
+        return @as(u32, @intCast(jsbundle_prefix.len));
     }
 
     pub fn printSummaryFromDisk(
@@ -437,16 +431,16 @@ pub const NodeModuleBundle = struct {
         switch (size) {
             0...1024 * 1024 => {
                 switch (level) {
-                    .bad => Output.pretty("<red>{d: " ++ align_char ++ "6.2} KB</r>", .{@intToFloat(f64, size) / 1024.0}),
-                    .neutral => Output.pretty("{d: " ++ align_char ++ "6.2} KB</r>", .{@intToFloat(f64, size) / 1024.0}),
-                    .good => Output.pretty("<green>{d: " ++ align_char ++ "6.2} KB</r>", .{@intToFloat(f64, size) / 1024.0}),
+                    .bad => Output.pretty("<red>{d: " ++ align_char ++ "6.2} KB</r>", .{@as(f64, @floatFromInt(size)) / 1024.0}),
+                    .neutral => Output.pretty("{d: " ++ align_char ++ "6.2} KB</r>", .{@as(f64, @floatFromInt(size)) / 1024.0}),
+                    .good => Output.pretty("<green>{d: " ++ align_char ++ "6.2} KB</r>", .{@as(f64, @floatFromInt(size)) / 1024.0}),
                 }
             },
             else => {
                 switch (level) {
-                    .bad => Output.pretty("<red>{d: " ++ align_char ++ "6.2} MB</r>", .{@intToFloat(f64, size) / (1024 * 1024.0)}),
-                    .neutral => Output.pretty("{d: " ++ align_char ++ "6.2} MB</r>", .{@intToFloat(f64, size) / (1024 * 1024.0)}),
-                    .good => Output.pretty("<green>{d: " ++ align_char ++ "6.2} MB</r>", .{@intToFloat(f64, size) / (1024 * 1024.0)}),
+                    .bad => Output.pretty("<red>{d: " ++ align_char ++ "6.2} MB</r>", .{@as(f64, @floatFromInt(size)) / (1024 * 1024.0)}),
+                    .neutral => Output.pretty("{d: " ++ align_char ++ "6.2} MB</r>", .{@as(f64, @floatFromInt(size)) / (1024 * 1024.0)}),
+                    .good => Output.pretty("<green>{d: " ++ align_char ++ "6.2} MB</r>", .{@as(f64, @floatFromInt(size)) / (1024 * 1024.0)}),
                 }
             },
         }
@@ -461,11 +455,11 @@ pub const NodeModuleBundle = struct {
         const BufferStreamContext = struct {
             pub fn run(in: StreamType, out: DestinationStreamType, end_at: u32) !void {
                 var buf: [4096]u8 = undefined;
-                var remain = @intCast(i64, end_at);
+                var remain = @as(i64, @intCast(end_at));
                 var read_amount: i64 = 99999;
                 while (remain > 0 and read_amount > 0) {
-                    read_amount = @intCast(i64, in.read(&buf) catch 0);
-                    remain -= @intCast(i64, try out.write(buf[0..@intCast(usize, std.math.min(read_amount, remain))]));
+                    read_amount = @as(i64, @intCast(in.read(&buf) catch 0));
+                    remain -= @as(i64, @intCast(try out.write(buf[0..@as(usize, @intCast(@min(read_amount, remain)))])));
                 }
             }
         };
@@ -474,7 +468,7 @@ pub const NodeModuleBundle = struct {
             // darwin only allows reading ahead on/off, not specific amount
             _ = std.os.fcntl(input.handle, std.os.F.RDAHEAD, 1) catch 0;
         }
-        const end = (try getCodeEndPosition(input, false)) - @intCast(u32, jsbundle_prefix.len);
+        const end = (try getCodeEndPosition(input, false)) - @as(u32, @intCast(jsbundle_prefix.len));
 
         try BufferStreamContext.run(
             input,

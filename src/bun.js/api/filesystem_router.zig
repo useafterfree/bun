@@ -4,12 +4,12 @@ const http = @import("../../http.zig");
 const JavaScript = @import("../javascript.zig");
 const QueryStringMap = @import("../../url.zig").QueryStringMap;
 const CombinedScanner = @import("../../url.zig").CombinedScanner;
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
-const JSC = @import("bun").JSC;
+const JSC = @import("root").bun.JSC;
 const js = JSC.C;
-const WebCore = @import("../webcore/response.zig");
-const Bundler = @import("../../bundler.zig");
+const WebCore = JSC.WebCore;
+const Bundler = bun.bundler;
 const VirtualMachine = JavaScript.VirtualMachine;
 const ScriptSrcStream = std.io.FixedBufferStream([]u8);
 const ZigString = JSC.ZigString;
@@ -20,7 +20,7 @@ const JSObject = JSC.JSObject;
 const JSError = Base.JSError;
 const JSValue = JSC.JSValue;
 const JSGlobalObject = JSC.JSGlobalObject;
-const strings = @import("bun").strings;
+const strings = @import("root").bun.strings;
 const NewClass = Base.NewClass;
 const To = Base.To;
 const Request = WebCore.Request;
@@ -28,7 +28,7 @@ const Request = WebCore.Request;
 const FetchEvent = WebCore.FetchEvent;
 const URLPath = @import("../../http/url_path.zig");
 const URL = @import("../../url.zig").URL;
-const Log = @import("bun").logger;
+const Log = @import("root").bun.logger;
 const Resolver = @import("../../resolver/resolver.zig").Resolver;
 const Router = @import("../../router.zig");
 
@@ -153,7 +153,7 @@ pub const FileSystemRouter = struct {
     origin: ?*JSC.RefString = null,
     base_dir: ?*JSC.RefString = null,
     router: Router,
-    arena: *std.heap.ArenaAllocator = undefined,
+    arena: *@import("root").bun.ArenaAllocator = undefined,
     allocator: std.mem.Allocator = undefined,
     asset_prefix: ?*JSC.RefString = null,
 
@@ -178,6 +178,7 @@ pub const FileSystemRouter = struct {
         var origin_str: ZigString.Slice = .{};
         var asset_prefix_slice: ZigString.Slice = .{};
 
+        var out_buf: [bun.MAX_PATH_BYTES * 2]u8 = undefined;
         if (argument.get(globalThis, "style")) |style_val| {
             if (!style_val.getZigString(globalThis).eqlComptime("nextjs")) {
                 globalThis.throwInvalidArguments("Only 'nextjs' style is currently implemented", .{});
@@ -189,13 +190,28 @@ pub const FileSystemRouter = struct {
         }
 
         if (argument.get(globalThis, "dir")) |dir| {
+            if (!dir.isString()) {
+                globalThis.throwInvalidArguments("Expected dir to be a string", .{});
+                return null;
+            }
             const root_dir_path_ = dir.toSlice(globalThis, globalThis.allocator());
             if (!(root_dir_path_.len == 0 or strings.eqlComptime(root_dir_path_.slice(), "."))) {
-                root_dir_path = root_dir_path_;
+                // resolve relative path if needed
+                const path = root_dir_path_.slice();
+                if (bun.path.Platform.isAbsolute(.auto, path)) {
+                    root_dir_path = root_dir_path_;
+                } else {
+                    var parts = [_][]const u8{path};
+                    root_dir_path = JSC.ZigString.Slice.fromUTF8NeverFree(bun.path.joinAbsStringBuf(Fs.FileSystem.instance.top_level_dir, &out_buf, &parts, .auto));
+                }
             }
+        } else {
+            // dir is not optional
+            globalThis.throwInvalidArguments("Expected dir to be a string", .{});
+            return null;
         }
-        var arena = globalThis.allocator().create(std.heap.ArenaAllocator) catch unreachable;
-        arena.* = std.heap.ArenaAllocator.init(globalThis.allocator());
+        var arena = globalThis.allocator().create(@import("root").bun.ArenaAllocator) catch unreachable;
+        arena.* = @import("root").bun.ArenaAllocator.init(globalThis.allocator());
         var allocator = arena.allocator();
         var extensions = std.ArrayList(string).init(allocator);
         if (argument.get(globalThis, "fileExtensions")) |file_extensions| {
@@ -217,7 +233,7 @@ pub const FileSystemRouter = struct {
                     globalThis.allocator().destroy(arena);
                     return null;
                 }
-                if (val.getLengthOfArray(globalThis) == 0) continue;
+                if (val.getLength(globalThis) == 0) continue;
                 extensions.appendAssumeCapacity((val.toSlice(globalThis, allocator).clone(allocator) catch unreachable).slice()[1..]);
             }
         }
@@ -233,13 +249,13 @@ pub const FileSystemRouter = struct {
 
             asset_prefix_slice = asset_prefix.toSlice(globalThis, allocator).clone(allocator) catch unreachable;
         }
-
         var orig_log = vm.bundler.resolver.log;
         var log = Log.Log.init(allocator);
         vm.bundler.resolver.log = &log;
         defer vm.bundler.resolver.log = orig_log;
 
         var path_to_use = (root_dir_path.cloneWithTrailingSlash(allocator) catch unreachable).slice();
+
         var root_dir_info = vm.bundler.resolver.readDirInfo(path_to_use) catch {
             globalThis.throwValue(log.toJS(globalThis, globalThis.allocator(), "reading root directory"));
             origin_str.deinit();
@@ -253,11 +269,13 @@ pub const FileSystemRouter = struct {
             globalThis.allocator().destroy(arena);
             return null;
         };
+
         var router = Router.init(vm.bundler.fs, allocator, .{
             .dir = path_to_use,
             .extensions = if (extensions.items.len > 0) extensions.items else default_extensions,
             .asset_prefix_path = asset_prefix_slice.slice(),
         }) catch unreachable;
+
         router.loadRoutes(&log, root_dir_info, Resolver, &vm.bundler.resolver, router.config.dir) catch {
             globalThis.throwValue(log.toJS(globalThis, globalThis.allocator(), "loading routes"));
             origin_str.deinit();
@@ -267,6 +285,12 @@ pub const FileSystemRouter = struct {
         };
 
         if (argument.get(globalThis, "origin")) |origin| {
+            if (!origin.isString()) {
+                globalThis.throwInvalidArguments("Expected origin to be a string", .{});
+                arena.deinit();
+                globalThis.allocator().destroy(arena);
+                return null;
+            }
             origin_str = origin.toSlice(globalThis, globalThis.allocator());
         }
 
@@ -290,16 +314,18 @@ pub const FileSystemRouter = struct {
             .arena = arena,
             .allocator = allocator,
         };
+
         router.config.dir = fs_router.base_dir.?.slice();
         fs_router.base_dir.?.ref();
+
         return fs_router;
     }
 
     pub fn reload(this: *FileSystemRouter, globalThis: *JSC.JSGlobalObject, callframe: *JSC.CallFrame) callconv(.C) JSValue {
         var this_value = callframe.this();
 
-        var arena = globalThis.allocator().create(std.heap.ArenaAllocator) catch unreachable;
-        arena.* = std.heap.ArenaAllocator.init(globalThis.allocator());
+        var arena = globalThis.allocator().create(@import("root").bun.ArenaAllocator) catch unreachable;
+        arena.* = @import("root").bun.ArenaAllocator.init(globalThis.allocator());
 
         var allocator = arena.allocator();
         var vm = globalThis.bunVM();
@@ -424,7 +450,7 @@ pub const FileSystemRouter = struct {
         var name_strings = bun.default_allocator.alloc(ZigString, names.len * 2) catch unreachable;
         defer bun.default_allocator.free(name_strings);
         var paths_strings = name_strings[names.len..];
-        for (names) |name, i| {
+        for (names, 0..) |name, i| {
             name_strings[i] = ZigString.init(name).withEncoding();
             paths_strings[i] = ZigString.init(paths[i]).withEncoding();
         }
@@ -610,7 +636,7 @@ pub const MatchedRoute = struct {
                     std.debug.assert(entry.values.len > 0);
                     if (entry.values.len > 1) {
                         var values = query_string_value_refs_buf[0..entry.values.len];
-                        for (entry.values) |value, i| {
+                        for (entry.values, 0..) |value, i| {
                             values[i] = ZigString.init(value).withEncoding();
                         }
                         obj.putRecord(global, &str, values.ptr, values.len);

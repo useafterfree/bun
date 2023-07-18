@@ -1,6 +1,6 @@
 const Fs = @import("./fs.zig");
 const std = @import("std");
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -68,24 +68,25 @@ pub const INotify = struct {
 
         pub fn name(this: *const INotifyEvent) [:0]u8 {
             if (comptime Environment.allow_assert) std.debug.assert(this.name_len > 0);
+
             // the name_len field is wrong
             // it includes alignment / padding
             // but it is a sentineled value
             // so we can just trim it to the first null byte
-            return std.mem.sliceTo(@intToPtr([*]u8, @ptrToInt(this) + @sizeOf(INotifyEvent))[0..this.name_len :0], 0);
+            return bun.sliceTo(@as([*:0]u8, @ptrFromInt(@intFromPtr(&this.name_len) + @sizeOf(u32))), 0)[0.. :0];
         }
     };
     pub var inotify_fd: EventListIndex = 0;
     pub var loaded_inotify = false;
 
-    const EventListBuffer = [@sizeOf([128]INotifyEvent) + (128 * bun.MAX_PATH_BYTES)]u8;
+    const EventListBuffer = [@sizeOf([128]INotifyEvent) + (128 * bun.MAX_PATH_BYTES + (128 * @alignOf(INotifyEvent)))]u8;
     var eventlist: EventListBuffer = undefined;
     var eventlist_ptrs: [128]*const INotifyEvent = undefined;
 
     var watch_count: std.atomic.Atomic(u32) = std.atomic.Atomic(u32).init(0);
 
-    const watch_file_mask = IN_EXCL_UNLINK | IN_MOVE_SELF | IN_DELETE_SELF | IN_CLOSE_WRITE | IN_MOVED_TO;
-    const watch_dir_mask = IN_EXCL_UNLINK | IN_DELETE | IN_DELETE_SELF | IN_CREATE | IN_MOVE_SELF | IN_ONLYDIR | IN_MOVED_TO;
+    const watch_file_mask = std.os.linux.IN.EXCL_UNLINK | std.os.linux.IN.MOVE_SELF | std.os.linux.IN.DELETE_SELF | std.os.linux.IN.MOVED_TO | std.os.linux.IN.MODIFY;
+    const watch_dir_mask = std.os.linux.IN.EXCL_UNLINK | std.os.linux.IN.DELETE | std.os.linux.IN.DELETE_SELF | std.os.linux.IN.CREATE | std.os.linux.IN.MOVE_SELF | std.os.linux.IN.ONLYDIR | std.os.linux.IN.MOVED_TO;
 
     pub fn watchPath(pathname: [:0]const u8) !EventListIndex {
         std.debug.assert(loaded_inotify);
@@ -107,9 +108,18 @@ pub const INotify = struct {
         std.os.inotify_rm_watch(inotify_fd, wd);
     }
 
+    pub fn isRunning() bool {
+        return loaded_inotify;
+    }
+
+    var coalesce_interval: isize = 100_000;
     pub fn init() !void {
         std.debug.assert(!loaded_inotify);
         loaded_inotify = true;
+
+        if (std.os.getenvZ("BUN_INOTIFY_COALESCE_INTERVAL")) |env| {
+            coalesce_interval = std.fmt.parseInt(isize, env, 10) catch 100_000;
+        }
 
         inotify_fd = try std.os.inotify_init1(IN_CLOEXEC);
     }
@@ -121,20 +131,62 @@ pub const INotify = struct {
             Futex.wait(&watch_count, 0, null) catch unreachable;
             const rc = std.os.system.read(
                 inotify_fd,
-                @ptrCast([*]u8, @alignCast(@alignOf([*]u8), &eventlist)),
+                @as([*]u8, @ptrCast(@alignCast(&eventlist))),
                 @sizeOf(EventListBuffer),
             );
 
             switch (std.os.errno(rc)) {
                 .SUCCESS => {
-                    const len = @intCast(usize, rc);
+                    var len = @as(usize, @intCast(rc));
 
                     if (len == 0) return &[_]*INotifyEvent{};
+
+                    // IN_MODIFY is very noisy
+                    // we do a 0.1ms sleep to try to coalesce events better
+                    if (len < (@sizeOf(EventListBuffer) / 2)) {
+                        var fds = [_]std.os.pollfd{.{
+                            .fd = inotify_fd,
+                            .events = std.os.POLL.IN | std.os.POLL.ERR,
+                            .revents = 0,
+                        }};
+                        var timespec = std.os.timespec{ .tv_sec = 0, .tv_nsec = coalesce_interval };
+                        if ((std.os.ppoll(&fds, &timespec, null) catch 0) > 0) {
+                            while (true) {
+                                const new_rc = std.os.system.read(
+                                    inotify_fd,
+                                    @as([*]u8, @ptrCast(@alignCast(&eventlist))) + len,
+                                    @sizeOf(EventListBuffer) - len,
+                                );
+                                switch (std.os.errno(new_rc)) {
+                                    .SUCCESS => {
+                                        len += @as(usize, @intCast(new_rc));
+                                    },
+                                    .AGAIN => continue,
+                                    .INTR => continue,
+                                    .INVAL => return error.ShortRead,
+                                    .BADF => return error.INotifyFailedToStart,
+                                    else => unreachable,
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    // This is what replit does as of Jaunary 2023.
+                    // 1) CREATE .http.ts.3491171321~
+                    // 2) OPEN .http.ts.3491171321~
+                    // 3) ATTRIB .http.ts.3491171321~
+                    // 4) MODIFY .http.ts.3491171321~
+                    // 5) CLOSE_WRITE,CLOSE .http.ts.3491171321~
+                    // 6) MOVED_FROM .http.ts.3491171321~
+                    // 7) MOVED_TO http.ts
+                    // We still don't correctly handle MOVED_FROM && MOVED_TO it seems.
 
                     var count: u32 = 0;
                     var i: u32 = 0;
                     while (i < len) : (i += @sizeOf(INotifyEvent)) {
-                        const event = @ptrCast(*const INotifyEvent, @alignCast(@alignOf(*const INotifyEvent), eventlist[i..][0..@sizeOf(INotifyEvent)]));
+                        @setRuntimeSafety(false);
+                        var event = @as(*INotifyEvent, @ptrCast(@alignCast(eventlist[i..][0..@sizeOf(INotifyEvent)])));
                         i += event.name_len;
 
                         eventlist_ptrs[count] = event;
@@ -181,6 +233,10 @@ const DarwinWatcher = struct {
         if (fd == 0) return error.KQueueError;
     }
 
+    pub fn isRunning() bool {
+        return fd != 0;
+    }
+
     pub fn stop() void {
         if (fd != 0) {
             std.os.close(fd);
@@ -225,6 +281,12 @@ pub const WatchEvent = struct {
     name_off: u8 = 0,
     name_len: u8 = 0,
 
+    pub fn ignoreINotifyEvent(event: INotify.INotifyEvent) bool {
+        var stack: WatchEvent = undefined;
+        stack.fromINotify(event, 0);
+        return @as(std.meta.Int(.unsigned, @bitSizeOf(Op)), @bitCast(stack.op)) == 0;
+    }
+
     pub fn names(this: WatchEvent, buf: []?[:0]u8) []?[:0]u8 {
         if (this.name_len == 0) return &[_]?[:0]u8{};
         return buf[this.name_off..][0..this.name_len];
@@ -254,10 +316,10 @@ pub const WatchEvent = struct {
             .op = Op{
                 .delete = (kevent.fflags & std.c.NOTE_DELETE) > 0,
                 .metadata = (kevent.fflags & std.c.NOTE_ATTRIB) > 0,
-                .rename = (kevent.fflags & std.c.NOTE_RENAME) > 0,
+                .rename = (kevent.fflags & (std.c.NOTE_RENAME | std.c.NOTE_LINK)) > 0,
                 .write = (kevent.fflags & std.c.NOTE_WRITE) > 0,
             },
-            .index = @truncate(WatchItemIndex, kevent.udata),
+            .index = @as(WatchItemIndex, @truncate(kevent.udata)),
         };
     }
 
@@ -275,8 +337,6 @@ pub const WatchEvent = struct {
     }
 
     pub const Op = packed struct {
-        padding: u3 = 0,
-
         delete: bool = false,
         metadata: bool = false,
         rename: bool = false,
@@ -309,18 +369,22 @@ pub fn NewWatcher(comptime ContextType: type) type {
         watchloop_handle: ?std.Thread.Id = null,
         cwd: string,
         thread: std.Thread = undefined,
+        running: bool = true,
+        close_descriptors: bool = false,
 
         pub const HashType = u32;
 
         var evict_list: [WATCHER_MAX_LIST]WatchItemIndex = undefined;
 
         pub fn getHash(filepath: string) HashType {
-            return @truncate(HashType, std.hash.Wyhash.hash(0, filepath));
+            return @as(HashType, @truncate(bun.hash(filepath)));
         }
 
         pub fn init(ctx: ContextType, fs: *Fs.FileSystem, allocator: std.mem.Allocator) !*Watcher {
             var watcher = try allocator.create(Watcher);
-            try PlatformWatcher.init();
+            if (!PlatformWatcher.isRunning()) {
+                try PlatformWatcher.init();
+            }
 
             watcher.* = Watcher{
                 .fs = fs,
@@ -341,6 +405,26 @@ pub fn NewWatcher(comptime ContextType: type) type {
             this.thread = try std.Thread.spawn(.{}, Watcher.watchLoop, .{this});
         }
 
+        pub fn deinit(this: *Watcher, close_descriptors: bool) void {
+            this.mutex.lock();
+            defer this.mutex.unlock();
+
+            this.close_descriptors = close_descriptors;
+            if (this.watchloop_handle != null) {
+                this.running = false;
+            } else {
+                if (this.close_descriptors and this.running) {
+                    const fds = this.watchlist.items(.fd);
+                    for (fds) |fd| {
+                        std.os.close(fd);
+                    }
+                }
+                this.watchlist.deinit(this.allocator);
+                const allocator = this.allocator;
+                allocator.destroy(this);
+            }
+        }
+
         // This must only be called from the watcher thread
         pub fn watchLoop(this: *Watcher) !void {
             this.watchloop_handle = std.Thread.getCurrentId();
@@ -350,12 +434,24 @@ pub fn NewWatcher(comptime ContextType: type) type {
             if (FeatureFlags.verbose_watcher) Output.prettyln("Watcher started", .{});
 
             this._watchLoop() catch |err| {
-                Output.prettyErrorln("<r>Watcher crashed: <red><b>{s}<r>", .{@errorName(err)});
-
                 this.watchloop_handle = null;
                 PlatformWatcher.stop();
-                return;
+                if (this.running) {
+                    this.ctx.onError(err);
+                }
             };
+
+            // deinit and close descriptors if needed
+            if (this.close_descriptors) {
+                const fds = this.watchlist.items(.fd);
+                for (fds) |fd| {
+                    std.os.close(fd);
+                }
+            }
+            this.watchlist.deinit(this.allocator);
+
+            const allocator = this.allocator;
+            allocator.destroy(this);
         }
 
         var evict_list_i: WatchItemIndex = 0;
@@ -368,7 +464,7 @@ pub fn NewWatcher(comptime ContextType: type) type {
             if (comptime kind == .directory) {
                 for (parents) |parent| {
                     if (parent == hash) {
-                        evict_list[evict_list_i] = @truncate(WatchItemIndex, parent);
+                        evict_list[evict_list_i] = @as(WatchItemIndex, @truncate(parent));
                         evict_list_i += 1;
                     }
                 }
@@ -382,7 +478,7 @@ pub fn NewWatcher(comptime ContextType: type) type {
             // swapRemove messes up the order
             // But, it only messes up the order if any elements in the list appear after the item being removed
             // So if we just sort the list by the biggest index first, that should be fine
-            std.sort.sort(
+            std.sort.block(
                 WatchItemIndex,
                 evict_list[0..evict_list_i],
                 {},
@@ -426,7 +522,7 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 while (true) {
                     defer Output.flush();
 
-                    const count_ = std.os.system.kevent(
+                    var count_ = std.os.system.kevent(
                         DarwinWatcher.fd,
                         @as([*]KEvent, changelist),
                         0,
@@ -436,16 +532,53 @@ pub fn NewWatcher(comptime ContextType: type) type {
                         null,
                     );
 
-                    var changes = changelist[0..@intCast(usize, @max(0, count_))];
+                    // Give the events more time to coallesce
+                    if (count_ < 128 / 2) {
+                        const remain = 128 - count_;
+                        var timespec = std.os.timespec{ .tv_sec = 0, .tv_nsec = 100_000 };
+                        const extra = std.os.system.kevent(
+                            DarwinWatcher.fd,
+                            @as([*]KEvent, changelist[@as(usize, @intCast(count_))..].ptr),
+                            0,
+                            @as([*]KEvent, changelist[@as(usize, @intCast(count_))..].ptr),
+                            remain,
+
+                            &timespec,
+                        );
+
+                        count_ += extra;
+                    }
+
+                    var changes = changelist[0..@as(usize, @intCast(@max(0, count_)))];
                     var watchevents = this.watch_events[0..changes.len];
-                    for (changes) |event, i| {
-                        watchevents[i].fromKEvent(event);
+                    var out_len: usize = 0;
+                    if (changes.len > 0) {
+                        watchevents[0].fromKEvent(changes[0]);
+                        out_len = 1;
+                        var prev_event = changes[0];
+                        for (changes[1..]) |event| {
+                            if (prev_event.udata == event.udata) {
+                                var new: WatchEvent = undefined;
+                                new.fromKEvent(event);
+                                watchevents[out_len - 1].merge(new);
+                                continue;
+                            }
+
+                            watchevents[out_len].fromKEvent(event);
+                            prev_event = event;
+                            out_len += 1;
+                        }
+
+                        watchevents = watchevents[0..out_len];
                     }
 
                     this.mutex.lock();
                     defer this.mutex.unlock();
-
-                    this.ctx.onFileUpdate(watchevents, this.changed_filepaths[0..watchevents.len], this.watchlist);
+                    if (this.running) {
+                        this.ctx.onFileUpdate(watchevents, this.changed_filepaths[0..watchevents.len], this.watchlist);
+                    } else {
+                        break;
+                    }
                 }
             } else if (Environment.isLinux) {
                 restart: while (true) {
@@ -457,26 +590,26 @@ pub fn NewWatcher(comptime ContextType: type) type {
                     // TODO: is this thread safe?
                     var remaining_events = events.len;
 
-                    var name_off: u8 = 0;
-                    var temp_name_list: [128]?[:0]u8 = undefined;
-                    var temp_name_off: u8 = 0;
-
                     const eventlist_index = this.watchlist.items(.eventlist_index);
 
                     while (remaining_events > 0) {
-                        const slice = events[0..@min(remaining_events, this.watch_events.len)];
+                        var name_off: u8 = 0;
+                        var temp_name_list: [128]?[:0]u8 = undefined;
+                        var temp_name_off: u8 = 0;
+
+                        const slice = events[0..@min(128, remaining_events, this.watch_events.len)];
                         var watchevents = this.watch_events[0..slice.len];
                         var watch_event_id: u32 = 0;
                         for (slice) |event| {
                             watchevents[watch_event_id].fromINotify(
                                 event.*,
-                                @intCast(
+                                @as(
                                     WatchItemIndex,
-                                    std.mem.indexOfScalar(
+                                    @intCast(std.mem.indexOfScalar(
                                         INotify.EventListIndex,
                                         eventlist_index,
                                         event.watch_descriptor,
-                                    ) orelse continue,
+                                    ) orelse continue),
                                 ),
                             );
                             temp_name_list[temp_name_off] = if (event.name_len > 0)
@@ -484,19 +617,19 @@ pub fn NewWatcher(comptime ContextType: type) type {
                             else
                                 null;
                             watchevents[watch_event_id].name_off = temp_name_off;
-                            watchevents[watch_event_id].name_len = @as(u8, @boolToInt((event.name_len > 0)));
-                            temp_name_off += @as(u8, @boolToInt((event.name_len > 0)));
+                            watchevents[watch_event_id].name_len = @as(u8, @intFromBool((event.name_len > 0)));
+                            temp_name_off += @as(u8, @intFromBool((event.name_len > 0)));
 
                             watch_event_id += 1;
                         }
 
                         var all_events = watchevents[0..watch_event_id];
-                        std.sort.sort(WatchEvent, all_events, void{}, WatchEvent.sortByIndex);
+                        std.sort.block(WatchEvent, all_events, {}, WatchEvent.sortByIndex);
 
                         var last_event_index: usize = 0;
                         var last_event_id: INotify.EventListIndex = std.math.maxInt(INotify.EventListIndex);
 
-                        for (all_events) |_, i| {
+                        for (all_events, 0..) |_, i| {
                             if (all_events[i].name_len > 0) {
                                 this.changed_filepaths[name_off] = temp_name_list[all_events[i].name_off];
                                 all_events[i].name_off = name_off;
@@ -514,8 +647,11 @@ pub fn NewWatcher(comptime ContextType: type) type {
 
                         this.mutex.lock();
                         defer this.mutex.unlock();
-
-                        this.ctx.onFileUpdate(all_events[0 .. last_event_index + 1], this.changed_filepaths[0 .. name_off + 1], this.watchlist);
+                        if (this.running) {
+                            this.ctx.onFileUpdate(all_events[0 .. last_event_index + 1], this.changed_filepaths[0 .. name_off + 1], this.watchlist);
+                        } else {
+                            break;
+                        }
                         remaining_events -= slice.len;
                     }
                 }
@@ -523,9 +659,9 @@ pub fn NewWatcher(comptime ContextType: type) type {
         }
 
         pub fn indexOf(this: *Watcher, hash: HashType) ?u32 {
-            for (this.watchlist.items(.hash)) |other, i| {
+            for (this.watchlist.items(.hash), 0..) |other, i| {
                 if (hash == other) {
-                    return @truncate(u32, i);
+                    return @as(u32, @truncate(i));
                 }
             }
             return null;
@@ -568,17 +704,16 @@ pub fn NewWatcher(comptime ContextType: type) type {
             package_json: ?*PackageJSON,
             comptime copy_file_path: bool,
         ) !void {
-            var index: PlatformWatcher.EventListIndex = undefined;
+            var index: PlatformWatcher.EventListIndex = std.math.maxInt(PlatformWatcher.EventListIndex);
             const watchlist_id = this.watchlist.len;
 
             const file_path_: string = if (comptime copy_file_path)
-                std.mem.span(try this.allocator.dupeZ(u8, file_path))
+                bun.asByteSlice(try this.allocator.dupeZ(u8, file_path))
             else
                 file_path;
 
             if (comptime Environment.isMac) {
                 const KEvent = std.c.Kevent;
-                index = DarwinWatcher.eventlist_index;
 
                 // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html
                 var event = std.mem.zeroes(KEvent);
@@ -590,13 +725,11 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 event.fflags = std.c.NOTE_WRITE | std.c.NOTE_RENAME | std.c.NOTE_DELETE;
 
                 // id
-                event.ident = @intCast(usize, fd);
-
-                DarwinWatcher.eventlist_index += 1;
+                event.ident = @as(usize, @intCast(fd));
 
                 // Store the hash for fast filtering later
-                event.udata = @intCast(usize, watchlist_id);
-                DarwinWatcher.eventlist[index] = event;
+                event.udata = @as(usize, @intCast(watchlist_id));
+                var events: [1]KEvent = .{event};
 
                 // This took a lot of work to figure out the right permutation
                 // Basically:
@@ -604,16 +737,16 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 // our while(true) loop above receives notification of changes to any of the events created here.
                 _ = std.os.system.kevent(
                     DarwinWatcher.fd,
-                    DarwinWatcher.eventlist[index .. index + 1].ptr,
+                    @as([]KEvent, events[0..1]).ptr,
                     1,
-                    DarwinWatcher.eventlist[index .. index + 1].ptr,
+                    @as([]KEvent, events[0..1]).ptr,
                     0,
                     null,
                 );
             } else if (comptime Environment.isLinux) {
                 // var file_path_to_use_ = std.mem.trimRight(u8, file_path_, "/");
                 // var buf: [bun.MAX_PATH_BYTES+1]u8 = undefined;
-                // std.mem.copy(u8, &buf, file_path_to_use_);
+                // bun.copy(u8, &buf, file_path_to_use_);
                 // buf[file_path_to_use_.len] = 0;
                 var buf = file_path_.ptr;
                 var slice: [:0]const u8 = buf[0..file_path_.len :0];
@@ -621,7 +754,7 @@ pub fn NewWatcher(comptime ContextType: type) type {
             }
 
             this.watchlist.appendAssumeCapacity(.{
-                .file_path = std.mem.span(file_path_),
+                .file_path = file_path_,
                 .fd = fd,
                 .hash = hash,
                 .count = 0,
@@ -644,21 +777,20 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 if (fd_ > 0) break :brk fd_;
 
                 const dir = try std.fs.cwd().openIterableDir(file_path, .{});
-                break :brk @truncate(StoredFileDescriptorType, dir.dir.fd);
+                break :brk @as(StoredFileDescriptorType, @truncate(dir.dir.fd));
             };
 
             const parent_hash = Watcher.getHash(Fs.PathName.init(file_path).dirWithTrailingSlash());
-            var index: PlatformWatcher.EventListIndex = undefined;
+            var index: PlatformWatcher.EventListIndex = std.math.maxInt(PlatformWatcher.EventListIndex);
 
             const file_path_: string = if (comptime copy_file_path)
-                std.mem.span(try this.allocator.dupeZ(u8, file_path))
+                bun.asByteSlice(try this.allocator.dupeZ(u8, file_path))
             else
                 file_path;
 
             const watchlist_id = this.watchlist.len;
 
             if (Environment.isMac) {
-                index = DarwinWatcher.eventlist_index;
                 const KEvent = std.c.Kevent;
 
                 // https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html
@@ -675,12 +807,11 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 event.fflags = std.c.NOTE_WRITE | std.c.NOTE_RENAME | std.c.NOTE_DELETE;
 
                 // id
-                event.ident = @intCast(usize, fd);
+                event.ident = @as(usize, @intCast(fd));
 
-                DarwinWatcher.eventlist_index += 1;
                 // Store the hash for fast filtering later
-                event.udata = @intCast(usize, watchlist_id);
-                DarwinWatcher.eventlist[index] = event;
+                event.udata = @as(usize, @intCast(watchlist_id));
+                var events: [1]KEvent = .{event};
 
                 // This took a lot of work to figure out the right permutation
                 // Basically:
@@ -688,16 +819,16 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 // our while(true) loop above receives notification of changes to any of the events created here.
                 _ = std.os.system.kevent(
                     DarwinWatcher.fd,
-                    DarwinWatcher.eventlist[index .. index + 1].ptr,
+                    @as([]KEvent, events[0..1]).ptr,
                     1,
-                    DarwinWatcher.eventlist[index .. index + 1].ptr,
+                    @as([]KEvent, events[0..1]).ptr,
                     0,
                     null,
                 );
             } else if (Environment.isLinux) {
                 var file_path_to_use_ = std.mem.trimRight(u8, file_path_, "/");
                 var buf: [bun.MAX_PATH_BYTES + 1]u8 = undefined;
-                std.mem.copy(u8, &buf, file_path_to_use_);
+                bun.copy(u8, &buf, file_path_to_use_);
                 buf[file_path_to_use_.len] = 0;
                 var slice: [:0]u8 = buf[0..file_path_to_use_.len :0];
                 index = try INotify.watchDir(slice);
@@ -714,7 +845,7 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 .kind = .directory,
                 .package_json = null,
             });
-            return @truncate(WatchItemIndex, this.watchlist.len - 1);
+            return @as(WatchItemIndex, @truncate(this.watchlist.len - 1));
         }
 
         pub inline fn isEligibleDirectory(this: *Watcher, dir: string) bool {
@@ -767,18 +898,18 @@ pub fn NewWatcher(comptime ContextType: type) type {
                 if (dir_fd > 0) {
                     var fds = watchlist_slice.items(.fd);
                     if (std.mem.indexOfScalar(StoredFileDescriptorType, fds, dir_fd)) |i| {
-                        parent_watch_item = @truncate(WatchItemIndex, i);
+                        parent_watch_item = @as(WatchItemIndex, @truncate(i));
                     }
                 }
 
                 if (parent_watch_item == null) {
                     const hashes = watchlist_slice.items(.hash);
                     if (std.mem.indexOfScalar(HashType, hashes, parent_dir_hash)) |i| {
-                        parent_watch_item = @truncate(WatchItemIndex, i);
+                        parent_watch_item = @as(WatchItemIndex, @truncate(i));
                     }
                 }
             }
-            try this.watchlist.ensureUnusedCapacity(this.allocator, 1 + @intCast(usize, @boolToInt(parent_watch_item == null)));
+            try this.watchlist.ensureUnusedCapacity(this.allocator, 1 + @as(usize, @intCast(@intFromBool(parent_watch_item == null))));
 
             if (autowatch_parent_dir) {
                 parent_watch_item = parent_watch_item orelse try this.appendDirectoryAssumeCapacity(dir_fd, parent_dir, parent_dir_hash, copy_file_path);

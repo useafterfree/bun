@@ -1,4 +1,4 @@
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -10,12 +10,12 @@ const default_allocator = bun.default_allocator;
 const C = bun.C;
 const std = @import("std");
 
-const lex = @import("../js_lexer.zig");
-const logger = @import("bun").logger;
+const lex = bun.js_lexer;
+const logger = @import("root").bun.logger;
 
 const options = @import("../options.zig");
-const js_parser = @import("../js_parser.zig");
-const js_ast = @import("../js_ast.zig");
+const js_parser = bun.js_parser;
+const js_ast = bun.JSAst;
 const linker = @import("../linker.zig");
 
 const allocators = @import("../allocators.zig");
@@ -24,20 +24,20 @@ const Api = @import("../api/schema.zig").Api;
 const resolve_path = @import("../resolver/resolve_path.zig");
 const configureTransformOptionsForBun = @import("../bun.js/config.zig").configureTransformOptionsForBun;
 const Command = @import("../cli.zig").Command;
-const bundler = @import("../bundler.zig");
+const bundler = bun.bundler;
 const NodeModuleBundle = @import("../node_module_bundle.zig").NodeModuleBundle;
 const fs = @import("../fs.zig");
 const URL = @import("../url.zig").URL;
 const ParseJSON = @import("../json_parser.zig").ParseJSON;
 const Archive = @import("../libarchive/libarchive.zig").Archive;
 const Zlib = @import("../zlib.zig");
-const JSPrinter = @import("../js_printer.zig");
+const JSPrinter = bun.js_printer;
 const DotEnv = @import("../env_loader.zig");
 const NPMClient = @import("../which_npm_client.zig").NPMClient;
 const which = @import("../which.zig").which;
-const clap = @import("bun").clap;
+const clap = @import("root").bun.clap;
 const Lock = @import("../lock.zig").Lock;
-const Headers = @import("bun").HTTP.Headers;
+const Headers = @import("root").bun.HTTP.Headers;
 const CopyFile = @import("../copy_file.zig");
 const ShellCompletions = @import("./shell_completions.zig");
 
@@ -133,7 +133,7 @@ pub const InstallCompletionsCommand = struct {
 
         var completions_dir: string = "";
         var output_dir: std.fs.IterableDir = found: {
-            for (std.os.argv) |arg, i| {
+            for (std.os.argv, 0..) |arg, i| {
                 if (strings.eqlComptime(std.mem.span(arg), "completions")) {
                     if (std.os.argv.len > i + 1) {
                         const input = std.mem.span(std.os.argv[i + 1]);
@@ -167,7 +167,7 @@ pub const InstallCompletionsCommand = struct {
                 .fish => {
                     if (bun.getenvZ("XDG_CONFIG_HOME")) |config_dir| {
                         outer: {
-                            var paths = [_]string{ std.mem.span(config_dir), "./fish/completions" };
+                            var paths = [_]string{ config_dir, "./fish/completions" };
                             completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
                             break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
                                 break :outer;
@@ -176,7 +176,7 @@ pub const InstallCompletionsCommand = struct {
 
                     if (bun.getenvZ("XDG_DATA_HOME")) |data_dir| {
                         outer: {
-                            var paths = [_]string{ std.mem.span(data_dir), "./fish/completions" };
+                            var paths = [_]string{ data_dir, "./fish/completions" };
                             completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
 
                             break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
@@ -186,7 +186,7 @@ pub const InstallCompletionsCommand = struct {
 
                     if (bun.getenvZ("HOME")) |home_dir| {
                         outer: {
-                            var paths = [_]string{ std.mem.span(home_dir), "./.config/fish/completions" };
+                            var paths = [_]string{ home_dir, "./.config/fish/completions" };
                             completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
                             break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
                                 break :outer;
@@ -216,7 +216,7 @@ pub const InstallCompletionsCommand = struct {
                 },
                 .zsh => {
                     if (bun.getenvZ("fpath")) |fpath| {
-                        var splitter = std.mem.split(u8, std.mem.span(fpath), " ");
+                        var splitter = std.mem.split(u8, fpath, " ");
 
                         while (splitter.next()) |dir| {
                             completions_dir = dir;
@@ -226,7 +226,7 @@ pub const InstallCompletionsCommand = struct {
 
                     if (bun.getenvZ("XDG_DATA_HOME")) |data_dir| {
                         outer: {
-                            var paths = [_]string{ std.mem.span(data_dir), "./zsh-completions" };
+                            var paths = [_]string{ data_dir, "./zsh-completions" };
                             completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
 
                             break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
@@ -245,7 +245,7 @@ pub const InstallCompletionsCommand = struct {
                     if (bun.getenvZ("HOME")) |home_dir| {
                         {
                             outer: {
-                                var paths = [_]string{ std.mem.span(home_dir), "./.oh-my-zsh/completions" };
+                                var paths = [_]string{ home_dir, "./.oh-my-zsh/completions" };
                                 completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
                                 break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
                                     break :outer;
@@ -254,7 +254,7 @@ pub const InstallCompletionsCommand = struct {
 
                         {
                             outer: {
-                                var paths = [_]string{ std.mem.span(home_dir), "./.bun" };
+                                var paths = [_]string{ home_dir, "./.bun" };
                                 completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
                                 break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
                                     break :outer;
@@ -277,7 +277,7 @@ pub const InstallCompletionsCommand = struct {
                 .bash => {
                     if (bun.getenvZ("XDG_DATA_HOME")) |data_dir| {
                         outer: {
-                            var paths = [_]string{ std.mem.span(data_dir), "./bash-completion/completions" };
+                            var paths = [_]string{ data_dir, "./bash-completion/completions" };
                             completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
                             break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
                                 break :outer;
@@ -286,7 +286,7 @@ pub const InstallCompletionsCommand = struct {
 
                     if (bun.getenvZ("XDG_CONFIG_HOME")) |config_dir| {
                         outer: {
-                            var paths = [_]string{ std.mem.span(config_dir), "./bash-completion/completions" };
+                            var paths = [_]string{ config_dir, "./bash-completion/completions" };
                             completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
 
                             break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
@@ -297,7 +297,7 @@ pub const InstallCompletionsCommand = struct {
                     if (bun.getenvZ("HOME")) |home_dir| {
                         {
                             outer: {
-                                var paths = [_]string{ std.mem.span(home_dir), "./.oh-my-bash/custom/completions" };
+                                var paths = [_]string{ home_dir, "./.oh-my-bash/custom/completions" };
                                 completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
 
                                 break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
@@ -306,7 +306,7 @@ pub const InstallCompletionsCommand = struct {
                         }
                         {
                             outer: {
-                                var paths = [_]string{ std.mem.span(home_dir), "./.bash_completion.d" };
+                                var paths = [_]string{ home_dir, "./.bash_completion.d" };
                                 completions_dir = resolve_path.joinAbsString(cwd, &paths, .auto);
 
                                 break :found std.fs.openIterableDirAbsolute(completions_dir, .{}) catch
@@ -340,7 +340,7 @@ pub const InstallCompletionsCommand = struct {
                 );
             }
 
-            Output.errorLn(
+            Output.printErrorln(
                 "Please either pipe it:\n   bun completions > /to/a/file\n\n Or pass a directory:\n\n   bun completions /my/completions/dir\n",
                 .{},
             );
@@ -380,7 +380,7 @@ pub const InstallCompletionsCommand = struct {
         // Check if they need to load the zsh completions file into their .zshrc
         if (shell == .zsh) {
             var completions_absolute_path_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
-            var completions_path = std.os.getFdPath(output_file.handle, &completions_absolute_path_buf) catch unreachable;
+            var completions_path = bun.getFdPath(output_file.handle, &completions_absolute_path_buf) catch unreachable;
             var zshrc_filepath: [bun.MAX_PATH_BYTES]u8 = undefined;
             const needs_to_tell_them_to_add_completions_file = brk: {
                 var dot_zshrc: std.fs.File = zshrc: {
@@ -395,8 +395,8 @@ pub const InstallCompletionsCommand = struct {
                         // $ZDOTDIR/.zlogout
 
                         if (bun.getenvZ("ZDOTDIR")) |zdot_dir| {
-                            std.mem.copy(u8, &zshrc_filepath, std.mem.span(zdot_dir));
-                            std.mem.copy(u8, zshrc_filepath[zdot_dir.len..], "/.zshrc");
+                            bun.copy(u8, &zshrc_filepath, zdot_dir);
+                            bun.copy(u8, zshrc_filepath[zdot_dir.len..], "/.zshrc");
                             zshrc_filepath[zdot_dir.len + "/.zshrc".len] = 0;
                             var filepath = zshrc_filepath[0 .. zdot_dir.len + "/.zshrc".len :0];
                             break :zshrc std.fs.openFileAbsoluteZ(filepath, .{ .mode = .read_write }) catch break :first;
@@ -405,8 +405,8 @@ pub const InstallCompletionsCommand = struct {
 
                     second: {
                         if (bun.getenvZ("HOME")) |zdot_dir| {
-                            std.mem.copy(u8, &zshrc_filepath, std.mem.span(zdot_dir));
-                            std.mem.copy(u8, zshrc_filepath[zdot_dir.len..], "/.zshrc");
+                            bun.copy(u8, &zshrc_filepath, zdot_dir);
+                            bun.copy(u8, zshrc_filepath[zdot_dir.len..], "/.zshrc");
                             zshrc_filepath[zdot_dir.len + "/.zshrc".len] = 0;
                             var filepath = zshrc_filepath[0 .. zdot_dir.len + "/.zshrc".len :0];
                             break :zshrc std.fs.openFileAbsoluteZ(filepath, .{ .mode = .read_write }) catch break :second;
@@ -415,8 +415,8 @@ pub const InstallCompletionsCommand = struct {
 
                     third: {
                         if (bun.getenvZ("HOME")) |zdot_dir| {
-                            std.mem.copy(u8, &zshrc_filepath, std.mem.span(zdot_dir));
-                            std.mem.copy(u8, zshrc_filepath[zdot_dir.len..], "/.zshenv");
+                            bun.copy(u8, &zshrc_filepath, zdot_dir);
+                            bun.copy(u8, zshrc_filepath[zdot_dir.len..], "/.zshenv");
                             zshrc_filepath[zdot_dir.len + "/.zshenv".len] = 0;
                             var filepath = zshrc_filepath[0 .. zdot_dir.len + "/.zshenv".len :0];
                             break :zshrc std.fs.openFileAbsoluteZ(filepath, .{ .mode = .read_write }) catch break :third;

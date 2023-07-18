@@ -15,6 +15,8 @@ class JSInternalPromise;
 namespace Bun {
 using namespace JSC;
 
+class JSCommonJSModule;
+
 typedef uint8_t OnLoadResultType;
 const OnLoadResultType OnLoadResultTypeError = 0;
 const OnLoadResultType OnLoadResultTypeCode = 1;
@@ -50,9 +52,9 @@ public:
         return WebCore::subspaceForImpl<PendingVirtualModuleResult, WebCore::UseCustomHeapCellType::No>(
             vm,
             [](auto& spaces) { return spaces.m_clientSubspaceForPendingVirtualModuleResult.get(); },
-            [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForPendingVirtualModuleResult = WTFMove(space); },
+            [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForPendingVirtualModuleResult = std::forward<decltype(space)>(space); },
             [](auto& spaces) { return spaces.m_subspaceForPendingVirtualModuleResult.get(); },
-            [](auto& spaces, auto&& space) { spaces.m_subspaceForPendingVirtualModuleResult = WTFMove(space); });
+            [](auto& spaces, auto&& space) { spaces.m_subspaceForPendingVirtualModuleResult = std::forward<decltype(space)>(space); });
     }
 
     JS_EXPORT_PRIVATE static PendingVirtualModuleResult* create(VM&, Structure*);
@@ -82,13 +84,20 @@ OnLoadResult handleOnLoadResultNotPromise(Zig::GlobalObject* globalObject, JSC::
 JSValue fetchSourceCodeSync(
     Zig::GlobalObject* globalObject,
     ErrorableResolvedSource* res,
-    ZigString* specifier,
-    ZigString* referrer);
+    BunString* specifier,
+    BunString* referrer);
 
 JSValue fetchSourceCodeAsync(
     Zig::GlobalObject* globalObject,
     ErrorableResolvedSource* res,
-    ZigString* specifier,
-    ZigString* referrer);
+    BunString* specifier,
+    BunString* referrer);
+
+JSValue fetchCommonJSModule(
+    Zig::GlobalObject* globalObject,
+    JSCommonJSModule* moduleObject,
+    JSValue specifierValue,
+    BunString* specifier,
+    BunString* referrer);
 
 } // namespace Bun

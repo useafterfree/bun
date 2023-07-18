@@ -11,6 +11,9 @@ smol Loader {
     toml = 8;
     wasm = 9;
     napi = 10;
+    base64 = 11;
+    dataurl = 12;
+    text = 13;
 }
 
 smol FrameworkEntryPointType {
@@ -108,7 +111,7 @@ smol ResolveMode {
   bundle = 4;
 }
 
-smol Platform {
+smol Target {
   browser = 1;
   node = 2;
   bun = 3;
@@ -328,7 +331,7 @@ message TransformOptions {
   LoaderMap loaders = 13;
 
   string[] main_fields = 14;
-  Platform platform = 15;
+  Target target = 15;
 
   bool serve = 16;
 
@@ -587,4 +590,22 @@ message BunInstall {
   bool disable_manifest_cache = 16;
   string global_dir = 17;
   string global_bin_dir = 18;
+  bool frozen_lockfile = 19;
+  bool exact = 20;
+}
+
+struct ClientServerModule {
+  uint32 moduleId;
+  StringPointer inputName;
+  StringPointer assetName;
+  StringPointer exportNames;
+}
+
+struct ClientServerModuleManifest {
+  uint32 version;
+  ClientServerModule[] clientModules;
+  ClientServerModule[] serverModules;
+  ClientServerModule[] ssrModules;
+  StringPointer[] exportNames;
+  byte[] contents;
 }

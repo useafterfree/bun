@@ -1,4 +1,4 @@
-const bun = @import("bun");
+const bun = @import("root").bun;
 const Environment = bun.Environment;
 const std = @import("std");
 
@@ -26,17 +26,17 @@ pub const Constants = struct {
         pub const force = 4;
 
         pub inline fn isForceClone(this: Copyfile) bool {
-            return (@enumToInt(this) & COPYFILE_FICLONE_FORCE) != 0;
+            return (@intFromEnum(this) & COPYFILE_FICLONE_FORCE) != 0;
         }
 
         pub inline fn shouldntOverwrite(this: Copyfile) bool {
-            return (@enumToInt(this) & COPYFILE_EXCL) != 0;
+            return (@intFromEnum(this) & COPYFILE_EXCL) != 0;
         }
 
         pub inline fn canUseClone(this: Copyfile) bool {
             _ = this;
             return Environment.isMac;
-            // return (@enumToInt(this) | COPYFILE_FICLONE) != 0;
+            // return (@intFromEnum(this) | COPYFILE_FICLONE) != 0;
         }
     };
 
@@ -146,6 +146,7 @@ pub const Constants = struct {
 // Due to zig's format support max 32 arguments, we need to split
 // here.
 const constants_string_format1 =
+    \\
     \\export var constants = {{
     \\  F_OK: {d},
     \\  R_OK: {d},
@@ -193,7 +194,8 @@ const constants_string_format2 =
     \\  S_IWOTH: {d},
     \\  S_IXOTH: {d},
     \\  UV_FS_O_FILEMAP: {d}
-    \\}}
+    \\}};
+    \\
 ;
 
 const constants_string1 = std.fmt.comptimePrint(constants_string_format1, .{ Constants.F_OK, Constants.R_OK, Constants.W_OK, Constants.X_OK, Constants.COPYFILE_EXCL, Constants.COPYFILE_FICLONE, Constants.COPYFILE_FICLONE_FORCE, Constants.O_RDONLY, Constants.O_WRONLY, Constants.O_RDWR, Constants.O_CREAT, Constants.O_EXCL, Constants.O_NOCTTY, Constants.O_TRUNC, Constants.O_APPEND, Constants.O_DIRECTORY, Constants.O_NOATIME, Constants.O_NOFOLLOW, Constants.O_SYNC, Constants.O_DSYNC });

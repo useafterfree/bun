@@ -1,4 +1,4 @@
-const bun = @import("bun");
+const bun = @import("root").bun;
 const string = bun.string;
 const Output = bun.Output;
 const Global = bun.Global;
@@ -26,7 +26,7 @@ pub const BunxCommand = struct {
         bun.JSAst.Expr.Data.Store.create(default_allocator);
         bun.JSAst.Stmt.Data.Store.create(default_allocator);
 
-        const expr = try bun.json.ParseJSONUTF8(&source, bundler.log, bundler.allocator);
+        const expr = try bun.JSON.ParseJSONUTF8(&source, bundler.log, bundler.allocator);
 
         // choose the first package that fits
         if (expr.get("bin")) |bin_expr| {
@@ -66,7 +66,7 @@ pub const BunxCommand = struct {
                             .result => |result| result,
                         } orelse break;
 
-                        if (current.kind == .File) {
+                        if (current.kind == .file) {
                             if (current.name.len == 0) continue;
                             return try bundler.allocator.dupe(u8, current.name.slice());
                         }
@@ -81,7 +81,7 @@ pub const BunxCommand = struct {
     fn getBinNameFromProjectDirectory(bundler: *bun.Bundler, dir_fd: std.os.fd_t, package_name: []const u8) ![]const u8 {
         var subpath: [bun.MAX_PATH_BYTES]u8 = undefined;
         subpath[0.."node_modules/".len].* = "node_modules/".*;
-        @memcpy(subpath["node_modules/".len..], package_name.ptr, package_name.len);
+        @memcpy(subpath["node_modules/".len..][0..package_name.len], package_name);
         subpath["node_modules/".len + package_name.len] = std.fs.path.sep;
         subpath["node_modules/".len + package_name.len + 1 ..][0.."package.json".len].* = "package.json".*;
         subpath["node_modules/".len + package_name.len + 1 + "package.json".len] = 0;
@@ -118,6 +118,25 @@ pub const BunxCommand = struct {
         };
     }
 
+    fn exit_with_usage() noreturn {
+        Output.prettyErrorln(
+            \\usage<r><d>:<r> <cyan>bunx <r><d>[<r><blue>--bun<r><d>]<r><cyan> package<r><d>[@version] [...flags or arguments to pass through]<r>
+            \\
+            \\bunx runs an npm package executable, automatically installing into a global shared cache if not installed in node_modules.
+            \\
+            \\example<d>:<r>
+            \\
+            \\  <cyan>bunx bun-repl<r>
+            \\  <cyan>bunx prettier foo.js<r>
+            \\
+            \\The <blue>--bun<r> flag forces the package to run in Bun's JavaScript runtime, even when it tries to use Node.js.
+            \\
+            \\  <cyan>bunx <r><blue>--bun<r><cyan> tsc --version<r>
+            \\
+        , .{});
+        Global.exit(1);
+    }
+
     pub fn exec(ctx: bun.CLI.Command.Context) !void {
         var requests_buf = bun.PackageManager.UpdateRequest.Array.init(0) catch unreachable;
         var run_in_bun = ctx.debug.run_in_bun;
@@ -125,7 +144,7 @@ pub const BunxCommand = struct {
         var passthrough_list = try std.ArrayList(string).initCapacity(ctx.allocator, std.os.argv.len -| 1);
         var package_name_for_update_request = [1]string{""};
         {
-            var argv = std.mem.span(std.os.argv)[1..];
+            var argv = std.os.argv[1..];
 
             var found_subcommand_name = false;
 
@@ -158,7 +177,10 @@ pub const BunxCommand = struct {
             }
         }
 
-        const passthrough = passthrough_list.items;
+        // check if package_name_for_update_request is empty string or " "
+        if (package_name_for_update_request[0].len == 0) {
+            exit_with_usage();
+        }
 
         var update_requests = bun.PackageManager.UpdateRequest.parse(
             ctx.allocator,
@@ -169,22 +191,7 @@ pub const BunxCommand = struct {
         );
 
         if (update_requests.len == 0) {
-            Output.prettyErrorln(
-                \\usage<r><d>:<r> <cyan>bunx <r><d>[<r><blue>--bun<r><d>]<r><cyan> package<r><d>[@version] [...flags or arguments to pass through]<r>
-                \\
-                \\bunx runs an npm package executable, automatically installing into a global shared cache if not installed in node_modules.
-                \\
-                \\example<d>:<r>
-                \\
-                \\  <cyan>bunx bun-repl<r>
-                \\  <cyan>bunx prettier foo.js<r>
-                \\
-                \\The <blue>--bun<r> flag forces the package to run in Bun's JavaScript runtime, even when it tries to use Node.js.
-                \\
-                \\  <cyan>bunx <r><blue>--bun<r><cyan> tsc --version<r>
-                \\
-            , .{});
-            Global.exit(1);
+            exit_with_usage();
         }
 
         // this shouldn't happen
@@ -204,6 +211,8 @@ pub const BunxCommand = struct {
 
         const initial_bin_name = if (strings.eqlComptime(update_request.name, "typescript"))
             "tsc"
+        else if (strings.lastIndexOfChar(update_request.name, '/')) |index|
+            update_request.name[index + 1 ..]
         else
             update_request.name;
 
@@ -223,11 +232,10 @@ pub const BunxCommand = struct {
         );
 
         var PATH = this_bundler.env.map.get("PATH").?;
-        const display_version: []const u8 =
-            if (update_request.missing_version)
+        const display_version = if (update_request.version.literal.isEmpty())
             "latest"
         else
-            update_request.version_buf;
+            update_request.version.literal.slice(update_request.version_buf);
 
         const PATH_FOR_BIN_DIRS = PATH;
         if (PATH.len > 0) {
@@ -249,6 +257,8 @@ pub const BunxCommand = struct {
         var absolute_in_cache_dir_buf: [bun.MAX_PATH_BYTES]u8 = undefined;
         var absolute_in_cache_dir = std.fmt.bufPrint(&absolute_in_cache_dir_buf, "/{s}/node_modules/.bin/{s}", .{ bunx_cache_dir, initial_bin_name }) catch unreachable;
 
+        const passthrough = passthrough_list.items;
+
         // Similar to "npx":
         //
         //  1. Try the bin in the current node_modules and then we try the bin in the global cache
@@ -263,7 +273,7 @@ pub const BunxCommand = struct {
             this_bundler.fs.top_level_dir,
             absolute_in_cache_dir,
         )) |destination| {
-            const out = std.mem.span(destination);
+            const out = bun.asByteSlice(destination);
             _ = try Run.runBinary(
                 ctx,
                 try this_bundler.fs.dirname_store.append(@TypeOf(out), out),
@@ -292,7 +302,7 @@ pub const BunxCommand = struct {
                     this_bundler.fs.top_level_dir,
                     absolute_in_cache_dir,
                 )) |destination| {
-                    const out = std.mem.span(destination);
+                    const out = bun.asByteSlice(destination);
                     _ = try Run.runBinary(
                         ctx,
                         try this_bundler.fs.dirname_store.append(@TypeOf(out), out),
@@ -355,10 +365,10 @@ pub const BunxCommand = struct {
                 }
             },
             .Signal => |signal| {
-                Global.exit(@truncate(u7, signal));
+                Global.exit(@as(u7, @truncate(signal)));
             },
             .Stopped => |signal| {
-                Global.exit(@truncate(u7, signal));
+                Global.exit(@as(u7, @truncate(signal)));
             },
             // shouldn't happen
             else => {
@@ -366,7 +376,7 @@ pub const BunxCommand = struct {
             },
         }
 
-        absolute_in_cache_dir = std.fmt.bufPrint(&absolute_in_cache_dir_buf, "{s}/node_modules/.bin/{s}", .{ bunx_cache_dir, update_request.name }) catch unreachable;
+        absolute_in_cache_dir = std.fmt.bufPrint(&absolute_in_cache_dir_buf, "{s}/node_modules/.bin/{s}", .{ bunx_cache_dir, initial_bin_name }) catch unreachable;
 
         // Similar to "npx":
         //
@@ -382,7 +392,7 @@ pub const BunxCommand = struct {
             this_bundler.fs.top_level_dir,
             absolute_in_cache_dir,
         )) |destination| {
-            const out = std.mem.span(destination);
+            const out = bun.asByteSlice(destination);
             _ = try Run.runBinary(
                 ctx,
                 try this_bundler.fs.dirname_store.append(@TypeOf(out), out),
@@ -412,7 +422,7 @@ pub const BunxCommand = struct {
                     this_bundler.fs.top_level_dir,
                     absolute_in_cache_dir,
                 )) |destination| {
-                    const out = std.mem.span(destination);
+                    const out = bun.asByteSlice(destination);
                     _ = try Run.runBinary(
                         ctx,
                         try this_bundler.fs.dirname_store.append(@TypeOf(out), out),

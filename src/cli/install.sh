@@ -50,7 +50,7 @@ success() {
 }
 
 command -v unzip >/dev/null ||
-    error 'unzip is required to install bun (see: https://github.com/oven-sh/bun#unzip-is-required)'
+    error 'unzip is required to install bun'
 
 if [[ $# -gt 2 ]]; then
     error 'Too many arguments, only 2 are allowed. The first can be a specific tag of bun to install. (e.g. "bun-v0.1.4") The second can be a build variant of bun to install. (e.g. "debug-info")'
@@ -103,7 +103,7 @@ exe_name=bun
 if [[ $# = 2 && $2 = debug-info ]]; then
     target=$target-profile
     exe_name=bun-profile
-    info "You requested a debug build of bun. More infomation will be shown if a crash occurs."
+    info "You requested a debug build of bun. More information will be shown if a crash occurs."
 fi
 
 if [[ $# = 0 ]]; then
@@ -295,7 +295,7 @@ info "To get started, run:"
 echo
 
 if [[ $refresh_command ]]; then
-    info_bold " $refresh_command"
+    info_bold "  $refresh_command"
 fi
 
 info_bold "  bun --help"

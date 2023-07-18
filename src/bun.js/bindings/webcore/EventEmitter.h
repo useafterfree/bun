@@ -45,7 +45,7 @@ public:
     ScriptExecutionContext* scriptExecutionContext() const { return ContextDestructionObserver::scriptExecutionContext(); };
 
     WEBCORE_EXPORT bool isNode() const { return false; };
-
+    bool removeAllListeners();
     WEBCORE_EXPORT void addListenerForBindings(const Identifier& eventType, RefPtr<EventListener>&&, bool, bool);
     WEBCORE_EXPORT void removeListenerForBindings(const Identifier& eventType, RefPtr<EventListener>&&);
     WEBCORE_EXPORT void removeAllListenersForBindings(const Identifier& eventType);
@@ -67,6 +67,8 @@ public:
     bool hasActiveEventListeners(const Identifier& eventType) const;
     bool hasEventListeners(JSC::VM& vm, ASCIILiteral eventType) const;
 
+    WTF::Function<void(EventEmitter&, const Identifier& eventName, bool isAdded)> onDidChangeListener = WTF::Function<void(EventEmitter&, const Identifier& eventName, bool isAdded)>(nullptr);
+
     unsigned getMaxListeners() const { return m_maxListeners; };
 
     void setMaxListeners(unsigned count);
@@ -83,6 +85,15 @@ public:
 
     IdentifierEventListenerMap& eventListenerMap() { return ensureEventEmitterData().eventListenerMap; }
 
+    void setThisObject(JSC::JSValue thisObject)
+    {
+        m_thisObject.clear();
+
+        if (thisObject.isCell()) {
+            m_thisObject = JSC::Weak<JSC::JSObject>(thisObject.getObject());
+        }
+    }
+
 private:
     EventEmitter(ScriptExecutionContext& context)
         : ContextDestructionObserver(&context)
@@ -92,13 +103,17 @@ private:
     EventEmitterData* eventTargetData() { return &m_eventTargetData; }
     EventEmitterData* eventTargetDataConcurrently() { return &m_eventTargetData; }
     EventEmitterData& ensureEventEmitterData() { return m_eventTargetData; }
-    void eventListenersDidChange() {}
+    void eventListenersDidChange()
+    {
+    }
 
     void innerInvokeEventListeners(const Identifier&, SimpleEventListenerVector, const MarkedArgumentBuffer& arguments);
     void invalidateEventListenerRegions();
 
     EventEmitterData m_eventTargetData;
     unsigned m_maxListeners { 10 };
+
+    mutable JSC::Weak<JSC::JSObject> m_thisObject { nullptr };
 };
 
 inline const EventEmitterData* EventEmitter::eventTargetData() const
